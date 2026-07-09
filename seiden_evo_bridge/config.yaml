@@ -1,7 +1,7 @@
 name: "Seiden EVO Bridge"
-version: "0.1.0"
+version: "0.2.0"
 slug: "seiden_evo_bridge"
-description: "Integra leitores EVO Facial ao Home Assistant via eventos"
+description: "Integra leitores EVO Facial ao Home Assistant com motor de presença"
 startup: services
 boot: auto
 init: false
@@ -13,11 +13,12 @@ arch:
 
 options:
   poll_interval: 2
-  ha_event: "seiden_evo_access"
+  ha_event: "seiden_presence"
   readers:
-    - name: "Recepção"
+    - name: "Entrada"
       ip: "192.168.4.157"
       password: "1234"
+      direction: "in"
 
 schema:
   poll_interval: int
@@ -26,3 +27,4 @@ schema:
     - name: str
       ip: str
       password: password
+      direction: list(in|out)
