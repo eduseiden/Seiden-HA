@@ -1,10 +1,11 @@
 import json
+import os
 import time
-import requests
 from pathlib import Path
 
+import requests
+
 CONFIG_PATH = Path("/data/options.json")
-SUPERVISOR_TOKEN = None
 
 
 def load_config():
@@ -20,14 +21,16 @@ def evo_cmd(reader, command, **kwargs):
     payload.update(kwargs)
 
     url = f"http://{reader['ip']}/api"
+
     response = requests.post(url, json=payload, timeout=5)
     response.raise_for_status()
+
     return response.json()
 
 
-def fire_ha_event(event_type, payload):
+def fire_ha_event(supervisor_token, event_type, payload):
     headers = {
-        "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+        "Authorization": f"Bearer {supervisor_token}",
         "Content-Type": "application/json",
     }
 
@@ -61,54 +64,78 @@ def normalize_record(reader, record):
     }
 
 
-def main():
-    global SUPERVISOR_TOKEN
+def make_record_key(record):
+    return "|".join(
+        [
+            str(record.get("time")),
+            str(record.get("enrollid")),
+            str(record.get("event")),
+            str(record.get("photourl")),
+        ]
+    )
 
+
+def main():
     config = load_config()
+
     readers = config.get("readers", [])
     poll_interval = config.get("poll_interval", 2)
     ha_event = config.get("ha_event", "seiden_evo_access")
 
-    SUPERVISOR_TOKEN = Path("/var/run/secrets/supervisor_token").read_text().strip()
+    supervisor_token = os.environ.get("SUPERVISOR_TOKEN")
+
+    if not supervisor_token:
+        raise RuntimeError("SUPERVISOR_TOKEN não encontrado")
 
     last_seen = {}
 
-    print("Seiden EVO Bridge iniciado")
-    print(f"Leitores configurados: {len(readers)}")
-    print(f"Evento HA: {ha_event}")
+    print("Seiden EVO Bridge iniciado", flush=True)
+    print(f"Leitores configurados: {len(readers)}", flush=True)
+    print(f"Evento HA: {ha_event}", flush=True)
 
     while True:
         for reader in readers:
-            reader_key = reader["ip"]
+            reader_name = reader.get("name", reader.get("ip"))
+            reader_ip = reader.get("ip")
 
             try:
                 data = evo_cmd(reader, "getlog")
 
                 if not data.get("result"):
-                    print(f"[{reader['name']}] getlog falhou: {data}")
+                    print(f"[{reader_name}] getlog falhou: {data}", flush=True)
                     continue
 
                 records = data.get("record", [])
+
                 if not records:
+                    print(f"[{reader_name}] Nenhum registro encontrado", flush=True)
                     continue
 
                 latest = records[0]
-                latest_key = f"{latest.get('time')}|{latest.get('enrollid')}|{latest.get('event')}|{latest.get('photourl')}"
+                latest_key = make_record_key(latest)
 
-                if reader_key not in last_seen:
-                    last_seen[reader_key] = latest_key
-                    print(f"[{reader['name']}] Último log inicial: {latest}")
+                if reader_ip not in last_seen:
+                    last_seen[reader_ip] = latest_key
+                    print(f"[{reader_name}] Último log inicial: {latest}", flush=True)
                     continue
 
-                if latest_key != last_seen[reader_key]:
-                    last_seen[reader_key] = latest_key
+                if latest_key != last_seen[reader_ip]:
+                    last_seen[reader_ip] = latest_key
+
                     payload = normalize_record(reader, latest)
 
-                    print(f"[{reader['name']}] Novo evento: {payload}")
-                    fire_ha_event(ha_event, payload)
+                    print(f"[{reader_name}] Novo evento: {payload}", flush=True)
+
+                    fire_ha_event(
+                        supervisor_token=supervisor_token,
+                        event_type=ha_event,
+                        payload=payload,
+                    )
+
+                    print(f"[{reader_name}] Evento enviado ao HA: {ha_event}", flush=True)
 
             except Exception as e:
-                print(f"[{reader.get('name', reader.get('ip'))}] Erro: {e}")
+                print(f"[{reader_name}] Erro: {e}", flush=True)
 
         time.sleep(poll_interval)
 
