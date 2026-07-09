@@ -1,7 +1,6 @@
-ARG BUILD_FROM
-FROM $BUILD_FROM
+FROM ghcr.io/home-assistant/amd64-base-python:3.13-alpine3.21
 
-RUN apk add --no-cache python3 py3-requests
+RUN apk add --no-cache py3-requests
 
 COPY run.sh /
 COPY evo_bridge.py /
