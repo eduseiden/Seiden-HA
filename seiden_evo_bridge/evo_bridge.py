@@ -108,7 +108,7 @@ def handle_authorized_record(reader, record, state):
     is_last_exit = False
 
     if direction == "in":
-    user_was_inside = user_id in state["people_inside"]
+        user_was_inside = user_id in state["people_inside"]
 
     if not user_was_inside:
         if people_before == 0:
