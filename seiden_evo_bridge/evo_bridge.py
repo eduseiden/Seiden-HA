@@ -190,7 +190,7 @@ def main():
 
     last_seen = {}
 
-    print("Seiden EVO Bridge v0.2.1 iniciado", flush=True)
+    print("Seiden EVO Bridge iniciado", flush=True)
     print(f"Leitores configurados: {len(readers)}", flush=True)
     print(f"Evento HA: {ha_event}", flush=True)
     print(
