@@ -1,5 +1,5 @@
 name: "Seiden EVO Bridge"
-version: "0.2.0"
+version: "0.2.1"
 slug: "seiden_evo_bridge"
 description: "Integra leitores EVO Facial ao Home Assistant com motor de presença"
 startup: services
