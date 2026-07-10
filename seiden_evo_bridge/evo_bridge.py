@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from datetime import datetime, date
+from datetime import date, datetime
 from pathlib import Path
 
 import requests
@@ -81,13 +81,15 @@ def fire_ha_event(supervisor_token, event_type, payload):
 
 
 def record_key(record):
-    return "|".join([
-        str(record.get("time")),
-        str(record.get("enrollid")),
-        str(record.get("event")),
-        str(record.get("mode")),
-        str(record.get("inout")),
-    ])
+    return "|".join(
+        [
+            str(record.get("time")),
+            str(record.get("enrollid")),
+            str(record.get("event")),
+            str(record.get("mode")),
+            str(record.get("inout")),
+        ]
+    )
 
 
 def build_photo_url(reader, record):
@@ -110,28 +112,26 @@ def handle_authorized_record(reader, record, state):
     if direction == "in":
         user_was_inside = user_id in state["people_inside"]
 
-    if not user_was_inside:
-        if people_before == 0:
-            is_first_entry = True
-            state["first_entry_today"] = {
+        if not user_was_inside:
+            if people_before == 0:
+                is_first_entry = True
+                state["first_entry_today"] = {
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "time": event_time,
+                }
+
+            state["people_inside"][user_id] = {
                 "user_id": user_id,
                 "user_name": user_name,
-                "time": event_time,
+                "entered_at": event_time,
+                "reader_name": reader["name"],
             }
 
-        state["people_inside"][user_id] = {
-            "user_id": user_id,
-            "user_name": user_name,
-            "entered_at": event_time,
-            "reader_name": reader["name"],
-        } 
-        
         action = "entered"
 
     elif direction == "out":
-        entered_at = None
         if user_id in state["people_inside"]:
-            entered_at = state["people_inside"][user_id].get("entered_at")
             del state["people_inside"][user_id]
 
         if len(state["people_inside"]) == 0:
@@ -190,10 +190,13 @@ def main():
 
     last_seen = {}
 
-    print("Seiden EVO Bridge v0.2.0 iniciado", flush=True)
+    print("Seiden EVO Bridge v0.2.1 iniciado", flush=True)
     print(f"Leitores configurados: {len(readers)}", flush=True)
     print(f"Evento HA: {ha_event}", flush=True)
-    print(f"Pessoas dentro restauradas: {len(state['people_inside'])}", flush=True)
+    print(
+        f"Pessoas dentro restauradas: {len(state['people_inside'])}",
+        flush=True,
+    )
 
     while True:
         for reader in readers:
@@ -204,7 +207,10 @@ def main():
                 data = evo_cmd(reader, "getlog")
 
                 if not data.get("result"):
-                    print(f"[{reader_name}] getlog falhou: {data}", flush=True)
+                    print(
+                        f"[{reader_name}] getlog falhou: {data}",
+                        flush=True,
+                    )
                     continue
 
                 records = data.get("record", [])
@@ -216,20 +222,35 @@ def main():
 
                 if reader_ip not in last_seen:
                     last_seen[reader_ip] = latest_key
-                    print(f"[{reader_name}] Último log inicial: {latest}", flush=True)
+                    print(
+                        f"[{reader_name}] Último log inicial: {latest}",
+                        flush=True,
+                    )
                     continue
 
                 if latest_key == last_seen[reader_ip]:
                     continue
 
                 last_seen[reader_ip] = latest_key
-                print(f"[{reader_name}] Novo log: {latest}", flush=True)
+
+                print(
+                    f"[{reader_name}] Novo log: {latest}",
+                    flush=True,
+                )
 
                 if latest.get("event") != 0:
-                    print(f"[{reader_name}] Evento não autorizado/ignorado: {latest.get('event')}", flush=True)
+                    print(
+                        f"[{reader_name}] Evento não autorizado/ignorado: "
+                        f"{latest.get('event')}",
+                        flush=True,
+                    )
                     continue
 
-                payload = handle_authorized_record(reader, latest, state)
+                payload = handle_authorized_record(
+                    reader,
+                    latest,
+                    state,
+                )
 
                 fire_ha_event(
                     supervisor_token=supervisor_token,
@@ -238,14 +259,20 @@ def main():
                 )
 
                 print(
-                    f"[{reader_name}] {payload['user_name']} {payload['action']} | "
+                    f"[{reader_name}] "
+                    f"{payload['user_name']} "
+                    f"{payload['action']} | "
                     f"dentro={payload['people_inside_count']} | "
-                    f"first={payload['is_first_entry']} | last={payload['is_last_exit']}",
+                    f"first={payload['is_first_entry']} | "
+                    f"last={payload['is_last_exit']}",
                     flush=True,
                 )
 
             except Exception as e:
-                print(f"[{reader_name}] Erro: {e}", flush=True)
+                print(
+                    f"[{reader_name}] Erro: {e}",
+                    flush=True,
+                )
 
         time.sleep(poll_interval)
 
