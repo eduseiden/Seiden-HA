@@ -108,6 +108,9 @@ def handle_authorized_record(reader, record, state):
     is_last_exit = False
 
     if direction == "in":
+    user_was_inside = user_id in state["people_inside"]
+
+    if not user_was_inside:
         if people_before == 0:
             is_first_entry = True
             state["first_entry_today"] = {
@@ -121,8 +124,8 @@ def handle_authorized_record(reader, record, state):
             "user_name": user_name,
             "entered_at": event_time,
             "reader_name": reader["name"],
-        }
-
+        } 
+        
         action = "entered"
 
     elif direction == "out":
