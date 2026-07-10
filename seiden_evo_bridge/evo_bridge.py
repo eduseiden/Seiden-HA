@@ -85,7 +85,8 @@ def record_key(record):
         str(record.get("time")),
         str(record.get("enrollid")),
         str(record.get("event")),
-        str(record.get("photourl")),
+        str(record.get("mode")),
+        str(record.get("inout")),
     ])
 
 
