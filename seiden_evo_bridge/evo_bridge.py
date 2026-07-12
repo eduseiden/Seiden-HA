@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import sys
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -14,10 +16,48 @@ STATE_PATH = Path("/data/occupancy_state.json")
 DEFAULT_POLL_INTERVAL = 2
 DEFAULT_REQUEST_TIMEOUT = 5
 DEFAULT_MAX_RETRY_INTERVAL = 300
+DEFAULT_LOG_LEVEL = "INFO"
 
 DEFAULT_PRESENCE_EVENT = "seiden_presence"
 DEFAULT_READER_OFFLINE_EVENT = "seiden_reader_offline"
 DEFAULT_READER_ONLINE_EVENT = "seiden_reader_online"
+
+LOGGER = logging.getLogger("seiden_evo_bridge")
+
+
+def setup_logging(log_level: str) -> None:
+    """Configura o sistema de logs do Seiden EVO Bridge."""
+    normalized_level = str(log_level).upper()
+
+    valid_levels = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+    }
+
+    numeric_level = valid_levels.get(
+        normalized_level,
+        logging.INFO,
+    )
+
+    handler = logging.StreamHandler(sys.stdout)
+
+    handler.setFormatter(
+        logging.Formatter(
+            fmt=(
+                "[%(asctime)s] "
+                "[%(levelname)-7s] "
+                "%(message)s"
+            ),
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+
+    LOGGER.handlers.clear()
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(numeric_level)
+    LOGGER.propagate = False
 
 
 def now_iso() -> str:
@@ -31,7 +71,7 @@ def today_str() -> str:
 
 
 def load_config() -> dict[str, Any]:
-    """Carrega a configuração definida na interface do add-on."""
+    """Carrega a configuração definida na interface do App."""
     with CONFIG_PATH.open("r", encoding="utf-8") as file:
         return json.load(file)
 
@@ -49,6 +89,10 @@ def default_state() -> dict[str, Any]:
 def load_state() -> dict[str, Any]:
     """Carrega o estado persistente de ocupação."""
     if not STATE_PATH.exists():
+        LOGGER.info(
+            "[STATE] Nenhum estado anterior encontrado. "
+            "Um novo estado será criado."
+        )
         return default_state()
 
     try:
@@ -56,13 +100,12 @@ def load_state() -> dict[str, Any]:
             state = json.load(file)
 
     except (OSError, json.JSONDecodeError) as error:
-        print(
-            f"[SEIDEN][STATE] Não foi possível carregar o estado: {error}",
-            flush=True,
+        LOGGER.error(
+            "[STATE] Não foi possível carregar o estado: %s",
+            error,
         )
-        print(
-            "[SEIDEN][STATE] Um novo estado será iniciado.",
-            flush=True,
+        LOGGER.warning(
+            "[STATE] Um novo estado será iniciado."
         )
         return default_state()
 
@@ -77,26 +120,40 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    """Salva o estado do Occupancy Engine de forma persistente."""
+    """
+    Salva o estado do Occupancy Engine usando escrita atômica.
+
+    O arquivo temporário é escrito primeiro e, em seguida, substitui
+    o arquivo de estado definitivo.
+    """
     temporary_path = STATE_PATH.with_suffix(".tmp")
 
-    with temporary_path.open("w", encoding="utf-8") as file:
-        json.dump(
-            state,
-            file,
-            ensure_ascii=False,
-            indent=2,
+    try:
+        with temporary_path.open("w", encoding="utf-8") as file:
+            json.dump(
+                state,
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        temporary_path.replace(STATE_PATH)
+
+    except OSError:
+        LOGGER.exception(
+            "[STATE] Falha ao salvar o estado persistente."
         )
+        raise
 
-    temporary_path.replace(STATE_PATH)
 
-
-def reset_daily_state_if_needed(state: dict[str, Any]) -> None:
+def reset_daily_state_if_needed(
+    state: dict[str, Any],
+) -> None:
     """
-    Reinicia os indicadores diários ao mudar o dia.
+    Reinicia os indicadores diários quando a data muda.
 
-    As pessoas que permanecem dentro não são removidas, pois uma pessoa
-    pode legitimamente permanecer no local após a meia-noite.
+    As pessoas presentes não são removidas, pois alguém pode
+    permanecer no ambiente após a meia-noite.
     """
     current_date = today_str()
 
@@ -111,10 +168,10 @@ def reset_daily_state_if_needed(state: dict[str, Any]) -> None:
 
     save_state(state)
 
-    print(
-        f"[SEIDEN][STATE] Novo dia iniciado: "
-        f"{previous_date} → {current_date}",
-        flush=True,
+    LOGGER.info(
+        "[STATE] Novo dia iniciado: %s → %s",
+        previous_date,
+        current_date,
     )
 
 
@@ -131,8 +188,21 @@ def evo_cmd(
     }
     payload.update(kwargs)
 
+    url = f"http://{reader['ip']}/api"
+
+    LOGGER.debug(
+        "[EVO][%s] Requisição para %s: %s",
+        reader["name"],
+        url,
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "password"
+        },
+    )
+
     response = requests.post(
-        f"http://{reader['ip']}/api",
+        url,
         json=payload,
         timeout=request_timeout,
     )
@@ -142,7 +212,16 @@ def evo_cmd(
     data = response.json()
 
     if not isinstance(data, dict):
-        raise ValueError("A API do EVO retornou uma resposta inválida")
+        raise ValueError(
+            "A API do EVO retornou uma resposta inválida"
+        )
+
+    LOGGER.debug(
+        "[EVO][%s] Resposta do comando %s: %s",
+        reader["name"],
+        command,
+        data,
+    )
 
     return data
 
@@ -176,8 +255,8 @@ def safe_fire_ha_event(
     request_timeout: int,
 ) -> bool:
     """
-    Publica um evento no Home Assistant sem encerrar o Bridge em caso
-    de falha temporária na comunicação interna.
+    Publica um evento no Home Assistant sem encerrar o Bridge
+    em caso de falha temporária.
     """
     try:
         fire_ha_event(
@@ -186,13 +265,20 @@ def safe_fire_ha_event(
             payload=payload,
             request_timeout=request_timeout,
         )
+
+        LOGGER.debug(
+            "[HA] Evento publicado: %s | payload=%s",
+            event_type,
+            payload,
+        )
+
         return True
 
     except requests.RequestException as error:
-        print(
-            f"[SEIDEN][HA] Não foi possível publicar "
-            f"o evento {event_type}: {error}",
-            flush=True,
+        LOGGER.error(
+            "[HA] Não foi possível publicar o evento %s: %s",
+            event_type,
+            error,
         )
         return False
 
@@ -201,9 +287,9 @@ def record_key(record: dict[str, Any]) -> str:
     """
     Cria a chave lógica de um evento.
 
-    A URL da foto não participa da chave porque o EVO pode criar o
-    registro sem a foto e, logo depois, atualizar o mesmo registro
-    adicionando photourl.
+    photourl não participa da chave porque o EVO pode criar o
+    registro inicialmente sem foto e atualizar o mesmo registro
+    posteriormente com a URL da imagem.
     """
     return "|".join(
         [
@@ -235,7 +321,8 @@ def handle_authorized_record(
     state: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    Processa um acesso autorizado e atualiza o Occupancy Engine.
+    Processa uma autenticação autorizada e atualiza
+    o Occupancy Engine.
     """
     reset_daily_state_if_needed(state)
 
@@ -249,7 +336,11 @@ def handle_authorized_record(
 
     is_first_entry = False
     is_last_exit = False
-    was_already_inside = user_id in state["people_inside"]
+
+    was_already_inside = (
+        user_id in state["people_inside"]
+    )
+
     was_inside_before_exit = was_already_inside
 
     if direction == "in":
@@ -291,7 +382,9 @@ def handle_authorized_record(
     else:
         action = "access"
 
-    people_inside = list(state["people_inside"].values())
+    people_inside = list(
+        state["people_inside"].values()
+    )
 
     payload = {
         "provider": "evo",
@@ -309,15 +402,20 @@ def handle_authorized_record(
         "photo_url": photo_url,
         "was_already_inside": was_already_inside,
         "exit_without_entry": (
-            direction == "out" and not was_inside_before_exit
+            direction == "out"
+            and not was_inside_before_exit
         ),
         "is_first_entry": is_first_entry,
         "is_last_exit": is_last_exit,
         "people_inside_count": len(people_inside),
         "building_occupied": len(people_inside) > 0,
         "people_inside": people_inside,
-        "first_entry_today": state.get("first_entry_today"),
-        "last_exit_today": state.get("last_exit_today"),
+        "first_entry_today": state.get(
+            "first_entry_today"
+        ),
+        "last_exit_today": state.get(
+            "last_exit_today"
+        ),
         "raw": record,
     }
 
@@ -364,7 +462,10 @@ def mark_reader_offline(
     offline_event: str,
     request_timeout: int,
 ) -> None:
-    """Atualiza o estado de falha e agenda a próxima tentativa."""
+    """
+    Atualiza o estado de falha do leitor e agenda
+    uma nova tentativa.
+    """
     runtime["failures"] += 1
 
     retry_interval = calculate_backoff(
@@ -373,20 +474,30 @@ def mark_reader_offline(
         max_retry_interval=max_retry_interval,
     )
 
-    runtime["next_check"] = time.monotonic() + retry_interval
+    runtime["next_check"] = (
+        time.monotonic() + retry_interval
+    )
+
     runtime["last_error"] = str(error)
 
-    reader_name = reader.get("name", reader.get("ip"))
+    reader_name = reader.get(
+        "name",
+        reader.get("ip"),
+    )
+
     reader_ip = reader.get("ip")
 
     if not runtime["offline"]:
         runtime["offline"] = True
         runtime["offline_since_iso"] = now_iso()
-        runtime["offline_since_monotonic"] = time.monotonic()
+        runtime["offline_since_monotonic"] = (
+            time.monotonic()
+        )
 
-        print(
-            f"[EVO][{reader_name}] Leitor offline: {error}",
-            flush=True,
+        LOGGER.warning(
+            "[EVO][%s] Leitor offline: %s",
+            reader_name,
+            error,
         )
 
         offline_payload = {
@@ -394,7 +505,9 @@ def mark_reader_offline(
             "reader_name": reader_name,
             "reader_ip": reader_ip,
             "status": "offline",
-            "offline_since": runtime["offline_since_iso"],
+            "offline_since": (
+                runtime["offline_since_iso"]
+            ),
             "failure_count": runtime["failures"],
             "retry_in_seconds": retry_interval,
             "error": str(error),
@@ -407,11 +520,12 @@ def mark_reader_offline(
             request_timeout=request_timeout,
         )
 
-    print(
-        f"[EVO][{reader_name}] Tentativa "
-        f"{runtime['failures']} falhou. "
-        f"Nova tentativa em {retry_interval}s.",
-        flush=True,
+    LOGGER.warning(
+        "[EVO][%s] Tentativa %d falhou. "
+        "Nova tentativa em %ss.",
+        reader_name,
+        runtime["failures"],
+        retry_interval,
     )
 
 
@@ -423,22 +537,32 @@ def mark_reader_online(
     request_timeout: int,
 ) -> None:
     """Restaura o estado online após uma falha."""
-    reader_name = reader.get("name", reader.get("ip"))
+    reader_name = reader.get(
+        "name",
+        reader.get("ip"),
+    )
+
     reader_ip = reader.get("ip")
 
     if runtime["offline"]:
         offline_duration = 0
 
-        if runtime["offline_since_monotonic"] is not None:
+        if (
+            runtime["offline_since_monotonic"]
+            is not None
+        ):
             offline_duration = int(
                 time.monotonic()
-                - runtime["offline_since_monotonic"]
+                - runtime[
+                    "offline_since_monotonic"
+                ]
             )
 
-        print(
-            f"[EVO][{reader_name}] Leitor online novamente "
-            f"após {offline_duration}s.",
-            flush=True,
+        LOGGER.info(
+            "[EVO][%s] Leitor online novamente "
+            "após %ss.",
+            reader_name,
+            offline_duration,
         )
 
         online_payload = {
@@ -447,9 +571,15 @@ def mark_reader_online(
             "reader_ip": reader_ip,
             "status": "online",
             "online_at": now_iso(),
-            "offline_since": runtime["offline_since_iso"],
-            "offline_duration_seconds": offline_duration,
-            "previous_failure_count": runtime["failures"],
+            "offline_since": (
+                runtime["offline_since_iso"]
+            ),
+            "offline_duration_seconds": (
+                offline_duration
+            ),
+            "previous_failure_count": (
+                runtime["failures"]
+            ),
         }
 
         safe_fire_ha_event(
@@ -473,23 +603,28 @@ def validate_config(
     request_timeout: int,
     max_retry_interval: int,
 ) -> None:
-    """Valida os parâmetros essenciais antes de iniciar."""
+    """Valida os parâmetros essenciais do App."""
     if not readers:
-        raise RuntimeError("Nenhum leitor EVO foi configurado")
+        raise RuntimeError(
+            "Nenhum leitor EVO foi configurado"
+        )
 
     if poll_interval < 1:
         raise RuntimeError(
-            "poll_interval deve ser igual ou maior que 1"
+            "poll_interval deve ser igual "
+            "ou maior que 1"
         )
 
     if request_timeout < 1:
         raise RuntimeError(
-            "request_timeout deve ser igual ou maior que 1"
+            "request_timeout deve ser igual "
+            "ou maior que 1"
         )
 
     if max_retry_interval < poll_interval:
         raise RuntimeError(
-            "max_retry_interval não pode ser menor que poll_interval"
+            "max_retry_interval não pode ser menor "
+            "que poll_interval"
         )
 
     configured_ips: set[str] = set()
@@ -503,19 +638,24 @@ def validate_config(
         ):
             if required_field not in reader:
                 raise RuntimeError(
-                    f"Campo obrigatório ausente no leitor: "
-                    f"{required_field}"
+                    "Campo obrigatório ausente "
+                    f"no leitor: {required_field}"
                 )
 
-        if reader["direction"] not in ("in", "out"):
+        if reader["direction"] not in (
+            "in",
+            "out",
+        ):
             raise RuntimeError(
-                f"Direção inválida no leitor "
-                f"{reader['name']}: {reader['direction']}"
+                "Direção inválida no leitor "
+                f"{reader['name']}: "
+                f"{reader['direction']}"
             )
 
         if reader["ip"] in configured_ips:
             raise RuntimeError(
-                f"IP duplicado na configuração: {reader['ip']}"
+                "IP duplicado na configuração: "
+                f"{reader['ip']}"
             )
 
         configured_ips.add(reader["ip"])
@@ -524,6 +664,23 @@ def validate_config(
 def main() -> None:
     """Inicializa e executa o Seiden EVO Bridge."""
     config = load_config()
+
+    log_level = config.get(
+        "log_level",
+        DEFAULT_LOG_LEVEL,
+    )
+
+    setup_logging(log_level)
+
+    LOGGER.info(
+        "Seiden EVO Bridge iniciado."
+    )
+
+    LOGGER.info(
+        "Nível de log configurado: %s",
+        str(log_level).upper(),
+    )
+
     state = load_state()
 
     readers = config.get("readers", [])
@@ -571,7 +728,9 @@ def main() -> None:
         max_retry_interval=max_retry_interval,
     )
 
-    supervisor_token = os.environ.get("SUPERVISOR_TOKEN")
+    supervisor_token = os.environ.get(
+        "SUPERVISOR_TOKEN"
+    )
 
     if not supervisor_token:
         raise RuntimeError(
@@ -585,42 +744,52 @@ def main() -> None:
         for reader in readers
     }
 
-    print("Seiden EVO Bridge iniciado.", flush=True)
-    print(
-        f"Leitores configurados: {len(readers)}",
-        flush=True,
+    LOGGER.info(
+        "Leitores configurados: %d",
+        len(readers),
     )
-    print(
-        f"Evento de presença: {presence_event}",
-        flush=True,
+
+    LOGGER.info(
+        "Evento de presença: %s",
+        presence_event,
     )
-    print(
-        f"Evento de leitor offline: {reader_offline_event}",
-        flush=True,
+
+    LOGGER.info(
+        "Evento de leitor offline: %s",
+        reader_offline_event,
     )
-    print(
-        f"Evento de leitor online: {reader_online_event}",
-        flush=True,
+
+    LOGGER.info(
+        "Evento de leitor online: %s",
+        reader_online_event,
     )
-    print(
-        f"Polling normal: {poll_interval}s",
-        flush=True,
+
+    LOGGER.info(
+        "Polling normal: %ss",
+        poll_interval,
     )
-    print(
-        f"Backoff máximo: {max_retry_interval}s",
-        flush=True,
+
+    LOGGER.info(
+        "Timeout HTTP: %ss",
+        request_timeout,
     )
-    print(
-        f"Pessoas dentro restauradas: "
-        f"{len(state['people_inside'])}",
-        flush=True,
+
+    LOGGER.info(
+        "Backoff máximo: %ss",
+        max_retry_interval,
+    )
+
+    LOGGER.info(
+        "Pessoas dentro restauradas: %d",
+        len(state["people_inside"]),
     )
 
     for reader in readers:
-        print(
-            f"[EVO][{reader['name']}] "
-            f"{reader['ip']} | direção={reader['direction']}",
-            flush=True,
+        LOGGER.info(
+            "[EVO][%s] %s | direção=%s",
+            reader["name"],
+            reader["ip"],
+            reader["direction"],
         )
 
     while True:
@@ -631,10 +800,14 @@ def main() -> None:
                 "name",
                 reader.get("ip"),
             )
+
             reader_ip = reader["ip"]
             runtime = reader_runtime[reader_ip]
 
-            if time.monotonic() < runtime["next_check"]:
+            if (
+                time.monotonic()
+                < runtime["next_check"]
+            ):
                 continue
 
             try:
@@ -646,7 +819,8 @@ def main() -> None:
 
                 if not data.get("result"):
                     raise RuntimeError(
-                        f"getlog retornou falha: {data}"
+                        "getlog retornou falha: "
+                        f"{data}"
                     )
 
                 mark_reader_online(
@@ -660,6 +834,11 @@ def main() -> None:
                 records = data.get("record", [])
 
                 if not records:
+                    LOGGER.debug(
+                        "[EVO][%s] Nenhum registro "
+                        "retornado.",
+                        reader_name,
+                    )
                     continue
 
                 latest = records[0]
@@ -668,36 +847,46 @@ def main() -> None:
                 if reader_ip not in last_seen:
                     last_seen[reader_ip] = latest_key
 
-                    print(
-                        f"[EVO][{reader_name}] "
-                        f"Último log inicial: {latest}",
-                        flush=True,
+                    LOGGER.info(
+                        "[EVO][%s] Último log inicial: %s",
+                        reader_name,
+                        latest,
                     )
                     continue
 
-                if latest_key == last_seen[reader_ip]:
+                if (
+                    latest_key
+                    == last_seen[reader_ip]
+                ):
+                    LOGGER.debug(
+                        "[EVO][%s] Nenhum novo evento.",
+                        reader_name,
+                    )
                     continue
 
                 last_seen[reader_ip] = latest_key
 
-                print(
-                    f"[EVO][{reader_name}] Novo log: {latest}",
-                    flush=True,
+                LOGGER.debug(
+                    "[EVO][%s] Novo log recebido: %s",
+                    reader_name,
+                    latest,
                 )
 
                 if latest.get("event") != 0:
-                    print(
-                        f"[EVO][{reader_name}] "
-                        f"Evento não autorizado/ignorado: "
-                        f"{latest.get('event')}",
-                        flush=True,
+                    LOGGER.warning(
+                        "[EVO][%s] Evento não "
+                        "autorizado/ignorado: código=%s",
+                        reader_name,
+                        latest.get("event"),
                     )
                     continue
 
-                presence_payload = handle_authorized_record(
-                    reader=reader,
-                    record=latest,
-                    state=state,
+                presence_payload = (
+                    handle_authorized_record(
+                        reader=reader,
+                        record=latest,
+                        state=state,
+                    )
                 )
 
                 event_sent = safe_fire_ha_event(
@@ -708,17 +897,23 @@ def main() -> None:
                 )
 
                 if event_sent:
-                    print(
-                        f"[EVO][{reader_name}] "
-                        f"{presence_payload['user_name']} "
-                        f"{presence_payload['action']} | "
-                        f"dentro="
-                        f"{presence_payload['people_inside_count']} | "
-                        f"first="
-                        f"{presence_payload['is_first_entry']} | "
-                        f"last="
-                        f"{presence_payload['is_last_exit']}",
-                        flush=True,
+                    LOGGER.info(
+                        "[EVO][%s] %s %s | "
+                        "dentro=%d | first=%s | last=%s",
+                        reader_name,
+                        presence_payload[
+                            "user_name"
+                        ],
+                        presence_payload["action"],
+                        presence_payload[
+                            "people_inside_count"
+                        ],
+                        presence_payload[
+                            "is_first_entry"
+                        ],
+                        presence_payload[
+                            "is_last_exit"
+                        ],
                     )
 
             except (
@@ -732,25 +927,51 @@ def main() -> None:
                     runtime=runtime,
                     error=error,
                     poll_interval=poll_interval,
-                    max_retry_interval=max_retry_interval,
+                    max_retry_interval=(
+                        max_retry_interval
+                    ),
                     supervisor_token=supervisor_token,
-                    offline_event=reader_offline_event,
+                    offline_event=(
+                        reader_offline_event
+                    ),
                     request_timeout=request_timeout,
                 )
 
-            except Exception as error:
-                print(
-                    f"[EVO][{reader_name}] "
-                    f"Erro inesperado: "
-                    f"{type(error).__name__}: {error}",
-                    flush=True,
+            except Exception:
+                LOGGER.exception(
+                    "[EVO][%s] Erro inesperado.",
+                    reader_name,
                 )
 
-        elapsed = time.monotonic() - loop_started_at
-        sleep_time = max(0.2, poll_interval - elapsed)
+        elapsed = (
+            time.monotonic() - loop_started_at
+        )
+
+        sleep_time = max(
+            0.2,
+            poll_interval - elapsed,
+        )
 
         time.sleep(sleep_time)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+
+    except KeyboardInterrupt:
+        if LOGGER.handlers:
+            LOGGER.info(
+                "Seiden EVO Bridge encerrado."
+            )
+
+    except Exception:
+        if not LOGGER.handlers:
+            setup_logging(DEFAULT_LOG_LEVEL)
+
+        LOGGER.exception(
+            "Falha crítica ao iniciar ou executar "
+            "o Seiden EVO Bridge."
+        )
+
+        raise
