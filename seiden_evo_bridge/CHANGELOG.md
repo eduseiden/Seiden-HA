@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.1
+
+### Adicionado
+
+- Data e hora em todas as mensagens do Seiden EVO Bridge.
+- Níveis configuráveis de logging:
+  - DEBUG
+  - INFO
+  - WARNING
+  - ERROR
+- Configuração `log_level` na interface do App.
+- Logs detalhados de registros EVO no nível DEBUG.
+- Padronização das mensagens com identificação do componente e leitor.
+
+### Alterado
+
+- Mensagens de indisponibilidade passam a usar o nível WARNING.
+- Falhas de integração com o Home Assistant passam a usar o nível ERROR.
+- Eventos operacionais normais passam a usar o nível INFO.
+
+
 ## 0.3.0
 
 ### Adicionado
