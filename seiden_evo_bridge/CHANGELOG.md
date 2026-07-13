@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0
+
+### Adicionado
+
+- Listas independentes para leitores de entrada e de saída.
+- Configuração `entry_readers`.
+- Configuração `exit_readers`.
+- Direção determinada automaticamente pelo grupo do leitor.
+- Contadores de leitores de entrada e saída na inicialização.
+- Validação de nomes duplicados.
+- Compatibilidade temporária com a configuração antiga `readers`.
+- Configuração efetivamente carregada disponível no nível DEBUG,
+  com senhas ocultadas.
+
+### Alterado
+
+- Removido o campo editável `direction` de cada leitor.
+- A direção não depende mais do seletor gráfico do Home Assistant.
+- Leitores em `entry_readers` são tratados internamente como `in`.
+- Leitores em `exit_readers` são tratados internamente como `out`.
+
+### Correção
+
+- Corrigida a inconsistência em que o formulário mostrava `in`,
+  mas o App continuava utilizando `out` internamente.
+
+
 ## 0.3.1
 
 ### Adicionado
