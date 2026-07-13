@@ -1,5 +1,5 @@
 name: "Seiden EVO Bridge"
-version: "0.4.0"
+version: "0.4.1"
 slug: "seiden_evo_bridge"
 description: "Integra leitores EVO Facial ao Home Assistant com motor de ocupação e monitoramento de disponibilidade"
 url: "https://github.com/eduseiden/Seiden-HA"
@@ -30,6 +30,7 @@ options:
     - name: "Entrada Principal"
       ip: "192.168.4.157"
       password: "1234"
+      enabled: true
 
   exit_readers: []
 
@@ -47,8 +48,10 @@ schema:
     - name: str
       ip: str
       password: password
+      enabled: bool
 
   exit_readers:
     - name: str
       ip: str
       password: password
+      enabled: bool
