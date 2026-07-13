@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import time
+from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,7 @@ LOGGER = logging.getLogger("seiden_evo_bridge")
 
 
 def setup_logging(log_level: str) -> None:
-    """Configura o sistema de logs do Seiden EVO Bridge."""
+    """Configura o sistema de logs."""
     normalized_level = str(log_level).upper()
 
     valid_levels = {
@@ -83,7 +84,7 @@ def load_config() -> dict[str, Any]:
 def sanitize_config_for_log(
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Oculta senhas antes de registrar a configuração em DEBUG."""
+    """Oculta senhas antes de registrar a configuração."""
     sanitized = dict(config)
 
     for key in (
@@ -129,9 +130,6 @@ def build_readers_from_config(
     - todos os leitores;
     - leitores ativos;
     - leitores desativados.
-
-    Mantém compatibilidade temporária com a configuração antiga
-    denominada 'readers'.
     """
     entry_readers = config.get("entry_readers")
     exit_readers = config.get("exit_readers")
@@ -204,12 +202,10 @@ def build_readers_from_config(
                     "Existe um leitor inválido na configuração antiga"
                 )
 
-            direction = reader.get("direction", "in")
-
             all_readers.append(
                 normalize_reader(
                     reader=reader,
-                    direction=direction,
+                    direction=reader.get("direction", "in"),
                 )
             )
 
@@ -316,8 +312,7 @@ def reset_daily_state_if_needed(
     """
     Reinicia os indicadores diários quando a data muda.
 
-    Pessoas que permaneceram no ambiente após a meia-noite
-    continuam marcadas como presentes.
+    Pessoas que permaneceram após a meia-noite continuam presentes.
     """
     current_date = today_str()
 
@@ -448,8 +443,7 @@ def record_key(record: dict[str, Any]) -> str:
     """
     Cria uma chave lógica para deduplicação.
 
-    photourl não participa da chave, pois o EVO pode criar
-    o registro antes de associar a foto.
+    photourl não participa porque a foto pode ser associada depois.
     """
     return "|".join(
         [
@@ -498,8 +492,6 @@ def handle_authorized_record(
         user_id in state["people_inside"]
     )
 
-    was_inside_before_exit = was_already_inside
-
     if direction == "in":
         if not was_already_inside:
             if people_before == 0:
@@ -522,7 +514,7 @@ def handle_authorized_record(
         action = "entered"
 
     elif direction == "out":
-        if was_inside_before_exit:
+        if was_already_inside:
             del state["people_inside"][user_id]
 
             if len(state["people_inside"]) == 0:
@@ -562,7 +554,7 @@ def handle_authorized_record(
         "was_already_inside": was_already_inside,
         "exit_without_entry": (
             direction == "out"
-            and not was_inside_before_exit
+            and not was_already_inside
         ),
         "is_first_entry": is_first_entry,
         "is_last_exit": is_last_exit,
@@ -612,11 +604,7 @@ def calculate_backoff(
 
 
 def summarize_request_error(error: Exception) -> str:
-    """
-    Gera uma mensagem operacional curta.
-
-    A exceção completa permanece disponível no nível DEBUG.
-    """
+    """Gera uma descrição operacional curta do erro."""
     error_text = str(error).lower()
 
     if "host is unreachable" in error_text:
@@ -642,11 +630,11 @@ def summarize_request_error(error: Exception) -> str:
 
         return "Erro HTTP"
 
-    if isinstance(error, requests.ConnectionError):
-        return "Falha de conexão"
-
     if isinstance(error, requests.Timeout):
         return "Tempo de conexão esgotado"
+
+    if isinstance(error, requests.ConnectionError):
+        return "Falha de conexão"
 
     return type(error).__name__
 
@@ -695,8 +683,7 @@ def mark_reader_offline(
         )
 
         LOGGER.debug(
-            "[EVO][%s] Exceção completa ao marcar "
-            "o leitor como offline: %r",
+            "[EVO][%s] Exceção completa: %r",
             reader_name,
             error,
         )
@@ -707,9 +694,7 @@ def mark_reader_offline(
             "reader_ip": reader_ip,
             "direction": reader["direction"],
             "status": "offline",
-            "offline_since": (
-                runtime["offline_since_iso"]
-            ),
+            "offline_since": runtime["offline_since_iso"],
             "failure_count": runtime["failures"],
             "retry_in_seconds": retry_interval,
             "error": short_error,
@@ -765,15 +750,9 @@ def mark_reader_online(
             "direction": reader["direction"],
             "status": "online",
             "online_at": now_iso(),
-            "offline_since": (
-                runtime["offline_since_iso"]
-            ),
-            "offline_duration_seconds": (
-                offline_duration
-            ),
-            "previous_failure_count": (
-                runtime["failures"]
-            ),
+            "offline_since": runtime["offline_since_iso"],
+            "offline_duration_seconds": offline_duration,
+            "previous_failure_count": runtime["failures"],
         }
 
         safe_fire_ha_event(
@@ -796,7 +775,7 @@ def validate_global_config(
     request_timeout: int,
     max_retry_interval: int,
 ) -> None:
-    """Valida os parâmetros globais do App."""
+    """Valida os parâmetros globais."""
     if poll_interval < 1:
         raise RuntimeError(
             "poll_interval deve ser igual ou maior que 1"
@@ -814,18 +793,14 @@ def validate_global_config(
         )
 
 
-def validate_readers_config(
+def validate_reader_structure(
     readers: list[dict[str, Any]],
 ) -> None:
     """
-    Valida todos os leitores, inclusive os desativados.
+    Valida a estrutura de todos os leitores.
 
-    Isso evita que um leitor com dados incompletos seja reativado
-    posteriormente e provoque uma falha inesperada.
+    Duplicidades não são tratadas nesta etapa.
     """
-    configured_ips: set[str] = set()
-    configured_names: set[str] = set()
-
     for reader in readers:
         for required_field in (
             "name",
@@ -846,29 +821,166 @@ def validate_readers_config(
                 f"{reader['name']}: {reader['direction']}"
             )
 
-        enabled = reader.get("enabled", True)
-
-        if not isinstance(enabled, bool):
+        if not isinstance(
+            reader.get("enabled", True),
+            bool,
+        ):
             raise RuntimeError(
                 f"Valor enabled inválido no leitor "
                 f"{reader['name']}"
             )
 
-        normalized_ip = str(reader["ip"]).strip()
-        normalized_name = str(reader["name"]).strip().lower()
 
-        if normalized_ip in configured_ips:
-            raise RuntimeError(
-                f"IP duplicado na configuração: {normalized_ip}"
+def find_duplicate_values(
+    readers: list[dict[str, Any]],
+    field: str,
+    normalize_lower: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    """Retorna os valores duplicados de determinado campo."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for reader in readers:
+        value = str(reader[field]).strip()
+
+        if normalize_lower:
+            value = value.lower()
+
+        grouped[value].append(reader)
+
+    return {
+        value: matches
+        for value, matches in grouped.items()
+        if len(matches) > 1
+    }
+
+
+def validate_active_reader_duplicates(
+    active_readers: list[dict[str, Any]],
+) -> None:
+    """
+    Impede duplicidades operacionais entre leitores ativos.
+    """
+    duplicate_ips = find_duplicate_values(
+        readers=active_readers,
+        field="ip",
+    )
+
+    if duplicate_ips:
+        duplicate_ip = next(iter(duplicate_ips))
+
+        names = ", ".join(
+            reader["name"]
+            for reader in duplicate_ips[duplicate_ip]
+        )
+
+        raise RuntimeError(
+            f"IP duplicado entre leitores ativos: "
+            f"{duplicate_ip} ({names})"
+        )
+
+    duplicate_names = find_duplicate_values(
+        readers=active_readers,
+        field="name",
+        normalize_lower=True,
+    )
+
+    if duplicate_names:
+        duplicate_name = next(iter(duplicate_names))
+
+        raise RuntimeError(
+            f"Nome duplicado entre leitores ativos: "
+            f"{duplicate_name}"
+        )
+
+
+def log_disabled_reader_duplicates(
+    active_readers: list[dict[str, Any]],
+    disabled_readers: list[dict[str, Any]],
+) -> None:
+    """
+    Registra duplicidades envolvendo leitores desativados.
+
+    Essas situações não impedem a inicialização.
+    """
+    active_ips = {
+        str(reader["ip"]).strip()
+        for reader in active_readers
+    }
+
+    active_names = {
+        str(reader["name"]).strip().lower()
+        for reader in active_readers
+    }
+
+    warned_ips: set[str] = set()
+    warned_names: set[str] = set()
+
+    for reader in disabled_readers:
+        reader_ip = str(reader["ip"]).strip()
+        reader_name = str(reader["name"]).strip()
+        normalized_name = reader_name.lower()
+
+        if (
+            reader_ip in active_ips
+            and reader_ip not in warned_ips
+        ):
+            LOGGER.warning(
+                "[CONFIG] O IP %s é utilizado por um leitor ativo "
+                "e também por um leitor desativado. "
+                "Isso é permitido enquanto o segundo permanecer "
+                "desativado.",
+                reader_ip,
             )
+            warned_ips.add(reader_ip)
 
-        if normalized_name in configured_names:
-            raise RuntimeError(
-                f"Nome de leitor duplicado: {reader['name']}"
+        if (
+            normalized_name in active_names
+            and normalized_name not in warned_names
+        ):
+            LOGGER.warning(
+                "[CONFIG] O nome '%s' é utilizado por um leitor ativo "
+                "e também por um leitor desativado. "
+                "Isso é permitido enquanto o segundo permanecer "
+                "desativado.",
+                reader_name,
             )
+            warned_names.add(normalized_name)
 
-        configured_ips.add(normalized_ip)
-        configured_names.add(normalized_name)
+    duplicate_disabled_ips = find_duplicate_values(
+        readers=disabled_readers,
+        field="ip",
+    )
+
+    for duplicate_ip, readers in duplicate_disabled_ips.items():
+        names = ", ".join(
+            reader["name"]
+            for reader in readers
+        )
+
+        LOGGER.info(
+            "[CONFIG] IP repetido apenas entre leitores desativados: "
+            "%s (%s). Nenhum conflito operacional.",
+            duplicate_ip,
+            names,
+        )
+
+    duplicate_disabled_names = find_duplicate_values(
+        readers=disabled_readers,
+        field="name",
+        normalize_lower=True,
+    )
+
+    for _, readers in duplicate_disabled_names.items():
+        names = ", ".join(
+            reader["name"]
+            for reader in readers
+        )
+
+        LOGGER.info(
+            "[CONFIG] Nome repetido apenas entre leitores "
+            "desativados: %s. Nenhum conflito operacional.",
+            names,
+        )
 
 
 def log_reader_summary(
@@ -882,7 +994,7 @@ def log_reader_summary(
     request_timeout: int,
     max_retry_interval: int,
 ) -> None:
-    """Registra o resumo operacional na inicialização."""
+    """Registra o resumo operacional da inicialização."""
     active_entry_count = sum(
         1
         for reader in active_readers
@@ -969,7 +1081,7 @@ def log_reader_summary(
 
 
 def wait_without_active_readers() -> None:
-    """Mantém o Bridge ativo quando todos os leitores estão desativados."""
+    """Mantém o Bridge ativo quando todos estão desativados."""
     LOGGER.warning(
         "Nenhum leitor EVO está ativo. "
         "O Bridge permanecerá em espera."
@@ -1212,8 +1324,17 @@ def main() -> None:
         max_retry_interval=max_retry_interval,
     )
 
-    validate_readers_config(
+    validate_reader_structure(
         readers=all_readers,
+    )
+
+    validate_active_reader_duplicates(
+        active_readers=active_readers,
+    )
+
+    log_disabled_reader_duplicates(
+        active_readers=active_readers,
+        disabled_readers=disabled_readers,
     )
 
     supervisor_token = os.environ.get(
