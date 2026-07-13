@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.3
+
+### Corrigido
+
+- IPs e nomes duplicados entre leitores desativados deixam de impedir
+  a inicialização do Bridge.
+- Leitor ativo e leitor desativado podem compartilhar temporariamente
+  o mesmo IP ou nome.
+- Apenas duplicidades entre leitores ativos são tratadas como erro
+  operacional crítico.
+
+### Alterado
+
+- Duplicidade entre leitor ativo e desativado gera WARNING.
+- Duplicidade apenas entre leitores desativados gera INFO.
+- Leitores desativados continuam fora do polling, backoff e eventos.
+- Validação estrutural foi separada da validação operacional.
+
+
 ## 0.4.2
 
 ### Corrigido
