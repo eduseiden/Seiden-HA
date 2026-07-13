@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.1
+
+### Adicionado
+
+- Opção `enabled` para cada leitor de entrada e saída.
+- Possibilidade de desativar temporariamente um leitor sem removê-lo.
+- Contagem de leitores ativos e desativados na inicialização.
+- Identificação dos leitores desativados no log.
+
+### Alterado
+
+- Leitores desativados não realizam polling.
+- Leitores desativados não geram backoff.
+- Leitores desativados não geram eventos de disponibilidade.
+- Configurações antigas sem `enabled` continuam sendo consideradas ativas.
+
 ## 0.4.0
 
 ### Adicionado
