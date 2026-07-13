@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.2
+
+### Corrigido
+
+- Todos os leitores desativados deixam de causar encerramento crítico.
+- O Bridge permanece ativo em modo de espera quando não há leitores ativos.
+- Removida a duplicidade de traceback em falhas críticas.
+- Melhorada a apresentação dos logs durante manutenção planejada.
+
+### Alterado
+
+- Erros de comunicação são resumidos no nível WARNING.
+- A exceção completa permanece disponível no nível DEBUG.
+- Leitores desativados também são validados na inicialização.
+- Nenhum polling ou evento de disponibilidade é gerado quando todos
+  os leitores estão desativados.
+
+
 ## 0.4.1
 
 ### Adicionado
