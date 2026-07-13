@@ -22,6 +22,8 @@ DEFAULT_PRESENCE_EVENT = "seiden_presence"
 DEFAULT_READER_OFFLINE_EVENT = "seiden_reader_offline"
 DEFAULT_READER_ONLINE_EVENT = "seiden_reader_online"
 
+IDLE_SLEEP_SECONDS = 60
+
 LOGGER = logging.getLogger("seiden_evo_bridge")
 
 
@@ -118,11 +120,13 @@ def build_readers_from_config(
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     """
     Converte as listas de entrada e saída em leitores internos.
 
-    Retorna duas listas:
+    Retorna:
+    - todos os leitores;
     - leitores ativos;
     - leitores desativados.
 
@@ -160,7 +164,10 @@ def build_readers_from_config(
                 )
 
             all_readers.append(
-                normalize_reader(reader, "in")
+                normalize_reader(
+                    reader=reader,
+                    direction="in",
+                )
             )
 
         for reader in exit_readers:
@@ -170,7 +177,10 @@ def build_readers_from_config(
                 )
 
             all_readers.append(
-                normalize_reader(reader, "out")
+                normalize_reader(
+                    reader=reader,
+                    direction="out",
+                )
             )
 
     else:
@@ -197,7 +207,10 @@ def build_readers_from_config(
             direction = reader.get("direction", "in")
 
             all_readers.append(
-                normalize_reader(reader, direction)
+                normalize_reader(
+                    reader=reader,
+                    direction=direction,
+                )
             )
 
     active_readers = [
@@ -212,7 +225,11 @@ def build_readers_from_config(
         if not reader.get("enabled", True)
     ]
 
-    return active_readers, disabled_readers
+    return (
+        all_readers,
+        active_readers,
+        disabled_readers,
+    )
 
 
 def default_state() -> dict[str, Any]:
@@ -594,6 +611,46 @@ def calculate_backoff(
     )
 
 
+def summarize_request_error(error: Exception) -> str:
+    """
+    Gera uma mensagem operacional curta.
+
+    A exceção completa permanece disponível no nível DEBUG.
+    """
+    error_text = str(error).lower()
+
+    if "host is unreachable" in error_text:
+        return "Host inacessível"
+
+    if "connection refused" in error_text:
+        return "Conexão recusada"
+
+    if "timed out" in error_text:
+        return "Tempo de conexão esgotado"
+
+    if "name or service not known" in error_text:
+        return "Nome ou endereço não encontrado"
+
+    if "no route to host" in error_text:
+        return "Sem rota para o equipamento"
+
+    if isinstance(error, requests.HTTPError):
+        response = error.response
+
+        if response is not None:
+            return f"Erro HTTP {response.status_code}"
+
+        return "Erro HTTP"
+
+    if isinstance(error, requests.ConnectionError):
+        return "Falha de conexão"
+
+    if isinstance(error, requests.Timeout):
+        return "Tempo de conexão esgotado"
+
+    return type(error).__name__
+
+
 def mark_reader_offline(
     reader: dict[str, Any],
     runtime: dict[str, Any],
@@ -622,6 +679,8 @@ def mark_reader_offline(
     reader_name = reader["name"]
     reader_ip = reader["ip"]
 
+    short_error = summarize_request_error(error)
+
     if not runtime["offline"]:
         runtime["offline"] = True
         runtime["offline_since_iso"] = now_iso()
@@ -630,7 +689,14 @@ def mark_reader_offline(
         )
 
         LOGGER.warning(
-            "[EVO][%s] Leitor offline: %s",
+            "[EVO][%s] Leitor offline: %s.",
+            reader_name,
+            short_error,
+        )
+
+        LOGGER.debug(
+            "[EVO][%s] Exceção completa ao marcar "
+            "o leitor como offline: %r",
             reader_name,
             error,
         )
@@ -646,7 +712,8 @@ def mark_reader_offline(
             ),
             "failure_count": runtime["failures"],
             "retry_in_seconds": retry_interval,
-            "error": str(error),
+            "error": short_error,
+            "error_detail": str(error),
         }
 
         safe_fire_ha_event(
@@ -724,18 +791,12 @@ def mark_reader_online(
     runtime["last_error"] = None
 
 
-def validate_config(
-    readers: list[dict[str, Any]],
+def validate_global_config(
     poll_interval: int,
     request_timeout: int,
     max_retry_interval: int,
 ) -> None:
-    """Valida os parâmetros essenciais."""
-    if not readers:
-        raise RuntimeError(
-            "Nenhum leitor EVO ativo foi configurado"
-        )
-
+    """Valida os parâmetros globais do App."""
     if poll_interval < 1:
         raise RuntimeError(
             "poll_interval deve ser igual ou maior que 1"
@@ -752,6 +813,16 @@ def validate_config(
             "que poll_interval"
         )
 
+
+def validate_readers_config(
+    readers: list[dict[str, Any]],
+) -> None:
+    """
+    Valida todos os leitores, inclusive os desativados.
+
+    Isso evita que um leitor com dados incompletos seja reativado
+    posteriormente e provoque uma falha inesperada.
+    """
     configured_ips: set[str] = set()
     configured_names: set[str] = set()
 
@@ -775,6 +846,14 @@ def validate_config(
                 f"{reader['name']}: {reader['direction']}"
             )
 
+        enabled = reader.get("enabled", True)
+
+        if not isinstance(enabled, bool):
+            raise RuntimeError(
+                f"Valor enabled inválido no leitor "
+                f"{reader['name']}"
+            )
+
         normalized_ip = str(reader["ip"]).strip()
         normalized_name = str(reader["name"]).strip().lower()
 
@@ -792,145 +871,80 @@ def validate_config(
         configured_names.add(normalized_name)
 
 
-def main() -> None:
-    """Inicializa e executa o Seiden EVO Bridge."""
-    config = load_config()
-
-    log_level = config.get(
-        "log_level",
-        DEFAULT_LOG_LEVEL,
-    )
-
-    setup_logging(log_level)
-
-    LOGGER.info("Seiden EVO Bridge iniciado.")
-    LOGGER.info(
-        "Nível de log configurado: %s",
-        str(log_level).upper(),
-    )
-
-    LOGGER.debug(
-        "[CONFIG] Configuração carregada: %s",
-        sanitize_config_for_log(config),
-    )
-
-    readers, disabled_readers = (
-        build_readers_from_config(config)
-    )
-
-    state = load_state()
-
-    poll_interval = int(
-        config.get(
-            "poll_interval",
-            DEFAULT_POLL_INTERVAL,
-        )
-    )
-
-    request_timeout = int(
-        config.get(
-            "request_timeout",
-            DEFAULT_REQUEST_TIMEOUT,
-        )
-    )
-
-    max_retry_interval = int(
-        config.get(
-            "max_retry_interval",
-            DEFAULT_MAX_RETRY_INTERVAL,
-        )
-    )
-
-    presence_event = config.get(
-        "ha_event",
-        DEFAULT_PRESENCE_EVENT,
-    )
-
-    reader_offline_event = config.get(
-        "reader_offline_event",
-        DEFAULT_READER_OFFLINE_EVENT,
-    )
-
-    reader_online_event = config.get(
-        "reader_online_event",
-        DEFAULT_READER_ONLINE_EVENT,
-    )
-
-    validate_config(
-        readers=readers,
-        poll_interval=poll_interval,
-        request_timeout=request_timeout,
-        max_retry_interval=max_retry_interval,
-    )
-
-    supervisor_token = os.environ.get(
-        "SUPERVISOR_TOKEN"
-    )
-
-    if not supervisor_token:
-        raise RuntimeError(
-            "SUPERVISOR_TOKEN não encontrado"
-        )
-
-    last_seen: dict[str, str] = {}
-
-    reader_runtime = {
-        reader["ip"]: create_reader_runtime_state()
-        for reader in readers
-    }
-
-    entry_count = sum(
+def log_reader_summary(
+    active_readers: list[dict[str, Any]],
+    disabled_readers: list[dict[str, Any]],
+    state: dict[str, Any],
+    presence_event: str,
+    reader_offline_event: str,
+    reader_online_event: str,
+    poll_interval: int,
+    request_timeout: int,
+    max_retry_interval: int,
+) -> None:
+    """Registra o resumo operacional na inicialização."""
+    active_entry_count = sum(
         1
-        for reader in readers
+        for reader in active_readers
         if reader["direction"] == "in"
     )
 
-    exit_count = sum(
+    active_exit_count = sum(
         1
-        for reader in readers
+        for reader in active_readers
         if reader["direction"] == "out"
     )
 
     LOGGER.info(
         "Leitores ativos: %d",
-        len(readers),
+        len(active_readers),
     )
+
     LOGGER.info(
         "Leitores desativados: %d",
         len(disabled_readers),
     )
+
     LOGGER.info(
         "Leitores ativos de entrada: %d",
-        entry_count,
+        active_entry_count,
     )
+
     LOGGER.info(
         "Leitores ativos de saída: %d",
-        exit_count,
+        active_exit_count,
     )
+
     LOGGER.info(
         "Evento de presença: %s",
         presence_event,
     )
+
     LOGGER.info(
         "Evento de leitor offline: %s",
         reader_offline_event,
     )
+
     LOGGER.info(
         "Evento de leitor online: %s",
         reader_online_event,
     )
+
     LOGGER.info(
         "Polling normal: %ss",
         poll_interval,
     )
+
     LOGGER.info(
         "Timeout HTTP: %ss",
         request_timeout,
     )
+
     LOGGER.info(
         "Backoff máximo: %ss",
         max_retry_interval,
     )
+
     LOGGER.info(
         "Pessoas dentro restauradas: %d",
         len(state["people_inside"]),
@@ -940,18 +954,49 @@ def main() -> None:
         LOGGER.info(
             "[EVO][%s] %s | direção=%s | "
             "desativado pela configuração",
-            reader.get("name", "Sem nome"),
-            reader.get("ip", "Sem IP"),
-            reader.get("direction", "desconhecida"),
+            reader["name"],
+            reader["ip"],
+            reader["direction"],
         )
 
-    for reader in readers:
+    for reader in active_readers:
         LOGGER.info(
             "[EVO][%s] %s | direção=%s | ativo",
             reader["name"],
             reader["ip"],
             reader["direction"],
         )
+
+
+def wait_without_active_readers() -> None:
+    """Mantém o Bridge ativo quando todos os leitores estão desativados."""
+    LOGGER.warning(
+        "Nenhum leitor EVO está ativo. "
+        "O Bridge permanecerá em espera."
+    )
+
+    while True:
+        time.sleep(IDLE_SLEEP_SECONDS)
+
+
+def run_polling_loop(
+    readers: list[dict[str, Any]],
+    state: dict[str, Any],
+    supervisor_token: str,
+    presence_event: str,
+    reader_offline_event: str,
+    reader_online_event: str,
+    poll_interval: int,
+    request_timeout: int,
+    max_retry_interval: int,
+) -> None:
+    """Executa o loop principal de monitoramento."""
+    last_seen: dict[str, str] = {}
+
+    reader_runtime = {
+        reader["ip"]: create_reader_runtime_state()
+        for reader in readers
+    }
 
     while True:
         loop_started_at = time.monotonic()
@@ -1085,12 +1130,128 @@ def main() -> None:
                 )
 
         elapsed = time.monotonic() - loop_started_at
+
         sleep_time = max(
             0.2,
             poll_interval - elapsed,
         )
 
         time.sleep(sleep_time)
+
+
+def main() -> None:
+    """Inicializa e executa o Seiden EVO Bridge."""
+    config = load_config()
+
+    log_level = config.get(
+        "log_level",
+        DEFAULT_LOG_LEVEL,
+    )
+
+    setup_logging(log_level)
+
+    LOGGER.info("Seiden EVO Bridge iniciado.")
+
+    LOGGER.info(
+        "Nível de log configurado: %s",
+        str(log_level).upper(),
+    )
+
+    LOGGER.debug(
+        "[CONFIG] Configuração carregada: %s",
+        sanitize_config_for_log(config),
+    )
+
+    (
+        all_readers,
+        active_readers,
+        disabled_readers,
+    ) = build_readers_from_config(config)
+
+    state = load_state()
+
+    poll_interval = int(
+        config.get(
+            "poll_interval",
+            DEFAULT_POLL_INTERVAL,
+        )
+    )
+
+    request_timeout = int(
+        config.get(
+            "request_timeout",
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+    )
+
+    max_retry_interval = int(
+        config.get(
+            "max_retry_interval",
+            DEFAULT_MAX_RETRY_INTERVAL,
+        )
+    )
+
+    presence_event = config.get(
+        "ha_event",
+        DEFAULT_PRESENCE_EVENT,
+    )
+
+    reader_offline_event = config.get(
+        "reader_offline_event",
+        DEFAULT_READER_OFFLINE_EVENT,
+    )
+
+    reader_online_event = config.get(
+        "reader_online_event",
+        DEFAULT_READER_ONLINE_EVENT,
+    )
+
+    validate_global_config(
+        poll_interval=poll_interval,
+        request_timeout=request_timeout,
+        max_retry_interval=max_retry_interval,
+    )
+
+    validate_readers_config(
+        readers=all_readers,
+    )
+
+    supervisor_token = os.environ.get(
+        "SUPERVISOR_TOKEN"
+    )
+
+    if not supervisor_token:
+        raise RuntimeError(
+            "SUPERVISOR_TOKEN não encontrado"
+        )
+
+    log_reader_summary(
+        active_readers=active_readers,
+        disabled_readers=disabled_readers,
+        state=state,
+        presence_event=presence_event,
+        reader_offline_event=reader_offline_event,
+        reader_online_event=reader_online_event,
+        poll_interval=poll_interval,
+        request_timeout=request_timeout,
+        max_retry_interval=max_retry_interval,
+    )
+
+    if not active_readers:
+        wait_without_active_readers()
+        return
+
+    run_polling_loop(
+        readers=active_readers,
+        state=state,
+        supervisor_token=supervisor_token,
+        presence_event=presence_event,
+        reader_offline_event=reader_offline_event,
+        reader_online_event=reader_online_event,
+        poll_interval=poll_interval,
+        request_timeout=request_timeout,
+        max_retry_interval=max_retry_interval,
+    )
 
 
 if __name__ == "__main__":
@@ -1112,4 +1273,4 @@ if __name__ == "__main__":
             "o Seiden EVO Bridge."
         )
 
-        raise
+        sys.exit(1)
