@@ -42,14 +42,9 @@ def setup_logging(log_level: str) -> None:
     )
 
     handler = logging.StreamHandler(sys.stdout)
-
     handler.setFormatter(
         logging.Formatter(
-            fmt=(
-                "[%(asctime)s] "
-                "[%(levelname)-7s] "
-                "%(message)s"
-            ),
+            fmt="[%(asctime)s] [%(levelname)-7s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )
@@ -61,7 +56,7 @@ def setup_logging(log_level: str) -> None:
 
 
 def now_iso() -> str:
-    """Retorna o horário local atual no formato ISO."""
+    """Retorna a data e hora local no formato ISO."""
     return datetime.now().isoformat(timespec="seconds")
 
 
@@ -71,9 +66,128 @@ def today_str() -> str:
 
 
 def load_config() -> dict[str, Any]:
-    """Carrega a configuração definida na interface do App."""
+    """Carrega as opções fornecidas pelo Home Assistant."""
     with CONFIG_PATH.open("r", encoding="utf-8") as file:
-        return json.load(file)
+        config = json.load(file)
+
+    if not isinstance(config, dict):
+        raise RuntimeError(
+            "A configuração do App não possui um objeto JSON válido"
+        )
+
+    return config
+
+
+def sanitize_config_for_log(
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Oculta senhas antes de registrar a configuração em DEBUG."""
+    sanitized = dict(config)
+
+    for key in (
+        "entry_readers",
+        "exit_readers",
+        "readers",
+    ):
+        sanitized[key] = [
+            {
+                **reader,
+                "password": "***",
+            }
+            for reader in config.get(key, [])
+            if isinstance(reader, dict)
+        ]
+
+    return sanitized
+
+
+def build_readers_from_config(
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """
+    Converte as listas de entrada e saída em uma lista interna única.
+
+    Mantém compatibilidade temporária com a configuração antiga
+    denominada 'readers'.
+    """
+    entry_readers = config.get("entry_readers")
+    exit_readers = config.get("exit_readers")
+
+    new_configuration_present = (
+        entry_readers is not None
+        or exit_readers is not None
+    )
+
+    readers: list[dict[str, Any]] = []
+
+    if new_configuration_present:
+        if entry_readers is None:
+            entry_readers = []
+
+        if exit_readers is None:
+            exit_readers = []
+
+        if not isinstance(entry_readers, list):
+            raise RuntimeError(
+                "entry_readers deve ser uma lista"
+            )
+
+        if not isinstance(exit_readers, list):
+            raise RuntimeError(
+                "exit_readers deve ser uma lista"
+            )
+
+        for reader in entry_readers:
+            if not isinstance(reader, dict):
+                raise RuntimeError(
+                    "Existe um leitor de entrada inválido"
+                )
+
+            readers.append(
+                {
+                    **reader,
+                    "direction": "in",
+                }
+            )
+
+        for reader in exit_readers:
+            if not isinstance(reader, dict):
+                raise RuntimeError(
+                    "Existe um leitor de saída inválido"
+                )
+
+            readers.append(
+                {
+                    **reader,
+                    "direction": "out",
+                }
+            )
+
+        return readers
+
+    legacy_readers = config.get("readers", [])
+
+    if legacy_readers:
+        LOGGER.warning(
+            "[CONFIG] Configuração antiga detectada em 'readers'. "
+            "Migre os equipamentos para 'entry_readers' e "
+            "'exit_readers'."
+        )
+
+        if not isinstance(legacy_readers, list):
+            raise RuntimeError(
+                "A configuração antiga 'readers' deve ser uma lista"
+            )
+
+        for reader in legacy_readers:
+            if not isinstance(reader, dict):
+                raise RuntimeError(
+                    "Existe um leitor inválido na configuração antiga"
+                )
+
+            readers.append(dict(reader))
+
+    return readers
 
 
 def default_state() -> dict[str, Any]:
@@ -109,10 +223,23 @@ def load_state() -> dict[str, Any]:
         )
         return default_state()
 
+    if not isinstance(state, dict):
+        LOGGER.error(
+            "[STATE] O arquivo de estado não possui um objeto válido."
+        )
+        return default_state()
+
     state.setdefault("date", today_str())
     state.setdefault("people_inside", {})
     state.setdefault("first_entry_today", None)
     state.setdefault("last_exit_today", None)
+
+    if not isinstance(state["people_inside"], dict):
+        LOGGER.error(
+            "[STATE] people_inside inválido. "
+            "A ocupação será reiniciada."
+        )
+        state["people_inside"] = {}
 
     reset_daily_state_if_needed(state)
 
@@ -120,12 +247,7 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    """
-    Salva o estado do Occupancy Engine usando escrita atômica.
-
-    O arquivo temporário é escrito primeiro e, em seguida, substitui
-    o arquivo de estado definitivo.
-    """
+    """Salva o estado persistente usando escrita atômica."""
     temporary_path = STATE_PATH.with_suffix(".tmp")
 
     try:
@@ -152,8 +274,8 @@ def reset_daily_state_if_needed(
     """
     Reinicia os indicadores diários quando a data muda.
 
-    As pessoas presentes não são removidas, pois alguém pode
-    permanecer no ambiente após a meia-noite.
+    Pessoas que permaneceram no ambiente após a meia-noite
+    continuam dentro.
     """
     current_date = today_str()
 
@@ -254,10 +376,7 @@ def safe_fire_ha_event(
     payload: dict[str, Any],
     request_timeout: int,
 ) -> bool:
-    """
-    Publica um evento no Home Assistant sem encerrar o Bridge
-    em caso de falha temporária.
-    """
+    """Publica um evento sem encerrar o Bridge em caso de falha."""
     try:
         fire_ha_event(
             supervisor_token=supervisor_token,
@@ -285,11 +404,10 @@ def safe_fire_ha_event(
 
 def record_key(record: dict[str, Any]) -> str:
     """
-    Cria a chave lógica de um evento.
+    Cria uma chave lógica para deduplicação.
 
-    photourl não participa da chave porque o EVO pode criar o
-    registro inicialmente sem foto e atualizar o mesmo registro
-    posteriormente com a URL da imagem.
+    photourl não participa da chave, pois o EVO pode criar
+    o registro antes de associar a foto.
     """
     return "|".join(
         [
@@ -306,7 +424,7 @@ def build_photo_url(
     reader: dict[str, Any],
     record: dict[str, Any],
 ) -> str | None:
-    """Monta a URL completa da foto associada ao evento."""
+    """Monta a URL completa da foto."""
     photo_path = record.get("photourl")
 
     if not photo_path:
@@ -320,15 +438,12 @@ def handle_authorized_record(
     record: dict[str, Any],
     state: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    Processa uma autenticação autorizada e atualiza
-    o Occupancy Engine.
-    """
+    """Atualiza o Occupancy Engine após uma autenticação."""
     reset_daily_state_if_needed(state)
 
     user_id = str(record.get("enrollid"))
     user_name = record.get("name") or user_id
-    direction = reader.get("direction", "in")
+    direction = reader["direction"]
     event_time = record.get("time") or now_iso()
     photo_url = build_photo_url(reader, record)
 
@@ -380,7 +495,9 @@ def handle_authorized_record(
         action = "exited"
 
     else:
-        action = "access"
+        raise RuntimeError(
+            f"Direção interna inválida: {direction}"
+        )
 
     people_inside = list(
         state["people_inside"].values()
@@ -441,7 +558,7 @@ def calculate_backoff(
     failure_count: int,
     max_retry_interval: int,
 ) -> int:
-    """Calcula o próximo intervalo de tentativa."""
+    """Calcula o intervalo exponencial de nova tentativa."""
     exponential_interval = poll_interval * (
         2 ** max(failure_count - 1, 0)
     )
@@ -462,10 +579,7 @@ def mark_reader_offline(
     offline_event: str,
     request_timeout: int,
 ) -> None:
-    """
-    Atualiza o estado de falha do leitor e agenda
-    uma nova tentativa.
-    """
+    """Marca um leitor como indisponível."""
     runtime["failures"] += 1
 
     retry_interval = calculate_backoff(
@@ -480,12 +594,8 @@ def mark_reader_offline(
 
     runtime["last_error"] = str(error)
 
-    reader_name = reader.get(
-        "name",
-        reader.get("ip"),
-    )
-
-    reader_ip = reader.get("ip")
+    reader_name = reader["name"]
+    reader_ip = reader["ip"]
 
     if not runtime["offline"]:
         runtime["offline"] = True
@@ -504,6 +614,7 @@ def mark_reader_offline(
             "provider": "evo",
             "reader_name": reader_name,
             "reader_ip": reader_ip,
+            "direction": reader["direction"],
             "status": "offline",
             "offline_since": (
                 runtime["offline_since_iso"]
@@ -536,31 +647,21 @@ def mark_reader_online(
     online_event: str,
     request_timeout: int,
 ) -> None:
-    """Restaura o estado online após uma falha."""
-    reader_name = reader.get(
-        "name",
-        reader.get("ip"),
-    )
-
-    reader_ip = reader.get("ip")
+    """Restaura o leitor ao estado online."""
+    reader_name = reader["name"]
+    reader_ip = reader["ip"]
 
     if runtime["offline"]:
         offline_duration = 0
 
-        if (
-            runtime["offline_since_monotonic"]
-            is not None
-        ):
+        if runtime["offline_since_monotonic"] is not None:
             offline_duration = int(
                 time.monotonic()
-                - runtime[
-                    "offline_since_monotonic"
-                ]
+                - runtime["offline_since_monotonic"]
             )
 
         LOGGER.info(
-            "[EVO][%s] Leitor online novamente "
-            "após %ss.",
+            "[EVO][%s] Leitor online novamente após %ss.",
             reader_name,
             offline_duration,
         )
@@ -569,6 +670,7 @@ def mark_reader_online(
             "provider": "evo",
             "reader_name": reader_name,
             "reader_ip": reader_ip,
+            "direction": reader["direction"],
             "status": "online",
             "online_at": now_iso(),
             "offline_since": (
@@ -603,7 +705,7 @@ def validate_config(
     request_timeout: int,
     max_retry_interval: int,
 ) -> None:
-    """Valida os parâmetros essenciais do App."""
+    """Valida os parâmetros essenciais."""
     if not readers:
         raise RuntimeError(
             "Nenhum leitor EVO foi configurado"
@@ -611,14 +713,12 @@ def validate_config(
 
     if poll_interval < 1:
         raise RuntimeError(
-            "poll_interval deve ser igual "
-            "ou maior que 1"
+            "poll_interval deve ser igual ou maior que 1"
         )
 
     if request_timeout < 1:
         raise RuntimeError(
-            "request_timeout deve ser igual "
-            "ou maior que 1"
+            "request_timeout deve ser igual ou maior que 1"
         )
 
     if max_retry_interval < poll_interval:
@@ -628,6 +728,7 @@ def validate_config(
         )
 
     configured_ips: set[str] = set()
+    configured_names: set[str] = set()
 
     for reader in readers:
         for required_field in (
@@ -636,29 +737,34 @@ def validate_config(
             "password",
             "direction",
         ):
-            if required_field not in reader:
+            value = reader.get(required_field)
+
+            if value is None or str(value).strip() == "":
                 raise RuntimeError(
-                    "Campo obrigatório ausente "
-                    f"no leitor: {required_field}"
+                    f"Campo obrigatório vazio: {required_field}"
                 )
 
-        if reader["direction"] not in (
-            "in",
-            "out",
-        ):
+        if reader["direction"] not in ("in", "out"):
             raise RuntimeError(
-                "Direção inválida no leitor "
-                f"{reader['name']}: "
-                f"{reader['direction']}"
+                f"Direção inválida no leitor "
+                f"{reader['name']}: {reader['direction']}"
             )
 
-        if reader["ip"] in configured_ips:
+        normalized_ip = str(reader["ip"]).strip()
+        normalized_name = str(reader["name"]).strip().lower()
+
+        if normalized_ip in configured_ips:
             raise RuntimeError(
-                "IP duplicado na configuração: "
-                f"{reader['ip']}"
+                f"IP duplicado na configuração: {normalized_ip}"
             )
 
-        configured_ips.add(reader["ip"])
+        if normalized_name in configured_names:
+            raise RuntimeError(
+                f"Nome de leitor duplicado: {reader['name']}"
+            )
+
+        configured_ips.add(normalized_ip)
+        configured_names.add(normalized_name)
 
 
 def main() -> None:
@@ -672,18 +778,19 @@ def main() -> None:
 
     setup_logging(log_level)
 
-    LOGGER.info(
-        "Seiden EVO Bridge iniciado."
-    )
-
+    LOGGER.info("Seiden EVO Bridge iniciado.")
     LOGGER.info(
         "Nível de log configurado: %s",
         str(log_level).upper(),
     )
 
-    state = load_state()
+    LOGGER.debug(
+        "[CONFIG] Configuração carregada: %s",
+        sanitize_config_for_log(config),
+    )
 
-    readers = config.get("readers", [])
+    readers = build_readers_from_config(config)
+    state = load_state()
 
     poll_interval = int(
         config.get(
@@ -744,41 +851,54 @@ def main() -> None:
         for reader in readers
     }
 
+    entry_count = sum(
+        1
+        for reader in readers
+        if reader["direction"] == "in"
+    )
+
+    exit_count = sum(
+        1
+        for reader in readers
+        if reader["direction"] == "out"
+    )
+
     LOGGER.info(
         "Leitores configurados: %d",
         len(readers),
     )
-
+    LOGGER.info(
+        "Leitores de entrada: %d",
+        entry_count,
+    )
+    LOGGER.info(
+        "Leitores de saída: %d",
+        exit_count,
+    )
     LOGGER.info(
         "Evento de presença: %s",
         presence_event,
     )
-
     LOGGER.info(
         "Evento de leitor offline: %s",
         reader_offline_event,
     )
-
     LOGGER.info(
         "Evento de leitor online: %s",
         reader_online_event,
     )
-
     LOGGER.info(
         "Polling normal: %ss",
         poll_interval,
     )
-
     LOGGER.info(
         "Timeout HTTP: %ss",
         request_timeout,
     )
-
     LOGGER.info(
         "Backoff máximo: %ss",
         max_retry_interval,
     )
-
     LOGGER.info(
         "Pessoas dentro restauradas: %d",
         len(state["people_inside"]),
@@ -796,18 +916,11 @@ def main() -> None:
         loop_started_at = time.monotonic()
 
         for reader in readers:
-            reader_name = reader.get(
-                "name",
-                reader.get("ip"),
-            )
-
+            reader_name = reader["name"]
             reader_ip = reader["ip"]
             runtime = reader_runtime[reader_ip]
 
-            if (
-                time.monotonic()
-                < runtime["next_check"]
-            ):
+            if time.monotonic() < runtime["next_check"]:
                 continue
 
             try:
@@ -819,8 +932,7 @@ def main() -> None:
 
                 if not data.get("result"):
                     raise RuntimeError(
-                        "getlog retornou falha: "
-                        f"{data}"
+                        f"getlog retornou falha: {data}"
                     )
 
                 mark_reader_online(
@@ -835,8 +947,7 @@ def main() -> None:
 
                 if not records:
                     LOGGER.debug(
-                        "[EVO][%s] Nenhum registro "
-                        "retornado.",
+                        "[EVO][%s] Nenhum registro retornado.",
                         reader_name,
                     )
                     continue
@@ -854,10 +965,7 @@ def main() -> None:
                     )
                     continue
 
-                if (
-                    latest_key
-                    == last_seen[reader_ip]
-                ):
+                if latest_key == last_seen[reader_ip]:
                     LOGGER.debug(
                         "[EVO][%s] Nenhum novo evento.",
                         reader_name,
@@ -881,12 +989,10 @@ def main() -> None:
                     )
                     continue
 
-                presence_payload = (
-                    handle_authorized_record(
-                        reader=reader,
-                        record=latest,
-                        state=state,
-                    )
+                presence_payload = handle_authorized_record(
+                    reader=reader,
+                    record=latest,
+                    state=state,
                 )
 
                 event_sent = safe_fire_ha_event(
@@ -901,9 +1007,7 @@ def main() -> None:
                         "[EVO][%s] %s %s | "
                         "dentro=%d | first=%s | last=%s",
                         reader_name,
-                        presence_payload[
-                            "user_name"
-                        ],
+                        presence_payload["user_name"],
                         presence_payload["action"],
                         presence_payload[
                             "people_inside_count"
@@ -927,13 +1031,9 @@ def main() -> None:
                     runtime=runtime,
                     error=error,
                     poll_interval=poll_interval,
-                    max_retry_interval=(
-                        max_retry_interval
-                    ),
+                    max_retry_interval=max_retry_interval,
                     supervisor_token=supervisor_token,
-                    offline_event=(
-                        reader_offline_event
-                    ),
+                    offline_event=reader_offline_event,
                     request_timeout=request_timeout,
                 )
 
@@ -943,10 +1043,7 @@ def main() -> None:
                     reader_name,
                 )
 
-        elapsed = (
-            time.monotonic() - loop_started_at
-        )
-
+        elapsed = time.monotonic() - loop_started_at
         sleep_time = max(
             0.2,
             poll_interval - elapsed,
