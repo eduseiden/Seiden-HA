@@ -56,7 +56,7 @@ def setup_logging(log_level: str) -> None:
 
 
 def now_iso() -> str:
-    """Retorna a data e hora local no formato ISO."""
+    """Retorna data e hora local no formato ISO."""
     return datetime.now().isoformat(timespec="seconds")
 
 
@@ -101,11 +101,30 @@ def sanitize_config_for_log(
     return sanitized
 
 
+def normalize_reader(
+    reader: dict[str, Any],
+    direction: str,
+) -> dict[str, Any]:
+    """Normaliza um leitor para uso interno."""
+    return {
+        **reader,
+        "enabled": reader.get("enabled", True),
+        "direction": direction,
+    }
+
+
 def build_readers_from_config(
     config: dict[str, Any],
-) -> list[dict[str, Any]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     """
-    Converte as listas de entrada e saída em uma lista interna única.
+    Converte as listas de entrada e saída em leitores internos.
+
+    Retorna duas listas:
+    - leitores ativos;
+    - leitores desativados.
 
     Mantém compatibilidade temporária com a configuração antiga
     denominada 'readers'.
@@ -118,14 +137,11 @@ def build_readers_from_config(
         or exit_readers is not None
     )
 
-    readers: list[dict[str, Any]] = []
+    all_readers: list[dict[str, Any]] = []
 
     if new_configuration_present:
-        if entry_readers is None:
-            entry_readers = []
-
-        if exit_readers is None:
-            exit_readers = []
+        entry_readers = entry_readers or []
+        exit_readers = exit_readers or []
 
         if not isinstance(entry_readers, list):
             raise RuntimeError(
@@ -143,11 +159,8 @@ def build_readers_from_config(
                     "Existe um leitor de entrada inválido"
                 )
 
-            readers.append(
-                {
-                    **reader,
-                    "direction": "in",
-                }
+            all_readers.append(
+                normalize_reader(reader, "in")
             )
 
         for reader in exit_readers:
@@ -156,23 +169,19 @@ def build_readers_from_config(
                     "Existe um leitor de saída inválido"
                 )
 
-            readers.append(
-                {
-                    **reader,
-                    "direction": "out",
-                }
+            all_readers.append(
+                normalize_reader(reader, "out")
             )
 
-        return readers
+    else:
+        legacy_readers = config.get("readers", [])
 
-    legacy_readers = config.get("readers", [])
-
-    if legacy_readers:
-        LOGGER.warning(
-            "[CONFIG] Configuração antiga detectada em 'readers'. "
-            "Migre os equipamentos para 'entry_readers' e "
-            "'exit_readers'."
-        )
+        if legacy_readers:
+            LOGGER.warning(
+                "[CONFIG] Configuração antiga detectada em 'readers'. "
+                "Migre os equipamentos para 'entry_readers' e "
+                "'exit_readers'."
+            )
 
         if not isinstance(legacy_readers, list):
             raise RuntimeError(
@@ -185,9 +194,25 @@ def build_readers_from_config(
                     "Existe um leitor inválido na configuração antiga"
                 )
 
-            readers.append(dict(reader))
+            direction = reader.get("direction", "in")
 
-    return readers
+            all_readers.append(
+                normalize_reader(reader, direction)
+            )
+
+    active_readers = [
+        reader
+        for reader in all_readers
+        if reader.get("enabled", True)
+    ]
+
+    disabled_readers = [
+        reader
+        for reader in all_readers
+        if not reader.get("enabled", True)
+    ]
+
+    return active_readers, disabled_readers
 
 
 def default_state() -> dict[str, Any]:
@@ -275,7 +300,7 @@ def reset_daily_state_if_needed(
     Reinicia os indicadores diários quando a data muda.
 
     Pessoas que permaneceram no ambiente após a meia-noite
-    continuam dentro.
+    continuam marcadas como presentes.
     """
     current_date = today_str()
 
@@ -708,7 +733,7 @@ def validate_config(
     """Valida os parâmetros essenciais."""
     if not readers:
         raise RuntimeError(
-            "Nenhum leitor EVO foi configurado"
+            "Nenhum leitor EVO ativo foi configurado"
         )
 
     if poll_interval < 1:
@@ -789,7 +814,10 @@ def main() -> None:
         sanitize_config_for_log(config),
     )
 
-    readers = build_readers_from_config(config)
+    readers, disabled_readers = (
+        build_readers_from_config(config)
+    )
+
     state = load_state()
 
     poll_interval = int(
@@ -864,15 +892,19 @@ def main() -> None:
     )
 
     LOGGER.info(
-        "Leitores configurados: %d",
+        "Leitores ativos: %d",
         len(readers),
     )
     LOGGER.info(
-        "Leitores de entrada: %d",
+        "Leitores desativados: %d",
+        len(disabled_readers),
+    )
+    LOGGER.info(
+        "Leitores ativos de entrada: %d",
         entry_count,
     )
     LOGGER.info(
-        "Leitores de saída: %d",
+        "Leitores ativos de saída: %d",
         exit_count,
     )
     LOGGER.info(
@@ -904,9 +936,18 @@ def main() -> None:
         len(state["people_inside"]),
     )
 
+    for reader in disabled_readers:
+        LOGGER.info(
+            "[EVO][%s] %s | direção=%s | "
+            "desativado pela configuração",
+            reader.get("name", "Sem nome"),
+            reader.get("ip", "Sem IP"),
+            reader.get("direction", "desconhecida"),
+        )
+
     for reader in readers:
         LOGGER.info(
-            "[EVO][%s] %s | direção=%s",
+            "[EVO][%s] %s | direção=%s | ativo",
             reader["name"],
             reader["ip"],
             reader["direction"],
