@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+import re
 
 import requests
 
@@ -18,6 +19,8 @@ DEFAULT_POLL_INTERVAL = 2
 DEFAULT_REQUEST_TIMEOUT = 5
 DEFAULT_MAX_RETRY_INTERVAL = 300
 DEFAULT_LOG_LEVEL = "INFO"
+BRIDGE_VERSION = "0.4.4"
+DASHBOARD_PUBLISH_INTERVAL = 60
 
 DEFAULT_PRESENCE_EVENT = "seiden_presence"
 DEFAULT_READER_OFFLINE_EVENT = "seiden_reader_offline"
@@ -235,6 +238,10 @@ def default_state() -> dict[str, Any]:
         "people_inside": {},
         "first_entry_today": None,
         "last_exit_today": None,
+        "entries_today": 0,
+        "exits_today": 0,
+        "events_today": 0,
+        "last_event": None,
     }
 
 
@@ -271,6 +278,10 @@ def load_state() -> dict[str, Any]:
     state.setdefault("people_inside", {})
     state.setdefault("first_entry_today", None)
     state.setdefault("last_exit_today", None)
+    state.setdefault("entries_today", 0)
+    state.setdefault("exits_today", 0)
+    state.setdefault("events_today", 0)
+    state.setdefault("last_event", None)
 
     if not isinstance(state["people_inside"], dict):
         LOGGER.error(
@@ -324,6 +335,9 @@ def reset_daily_state_if_needed(
     state["date"] = current_date
     state["first_entry_today"] = None
     state["last_exit_today"] = None
+    state["entries_today"] = 0
+    state["exits_today"] = 0
+    state["events_today"] = 0
 
     save_state(state)
 
@@ -439,6 +453,147 @@ def safe_fire_ha_event(
         return False
 
 
+
+def slugify_entity(value: str) -> str:
+    """Converte um nome em identificador seguro para entidade do HA."""
+    normalized = re.sub(r"[^a-z0-9_]+", "_", str(value).strip().lower())
+    return re.sub(r"_+", "_", normalized).strip("_") or "reader"
+
+
+def set_ha_state(
+    supervisor_token: str,
+    entity_id: str,
+    state: Any,
+    attributes: dict[str, Any],
+    request_timeout: int,
+) -> bool:
+    """Cria ou atualiza uma entidade operacional no Home Assistant."""
+    headers = {
+        "Authorization": f"Bearer {supervisor_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {"state": str(state), "attributes": attributes}
+
+    try:
+        response = requests.post(
+            f"http://supervisor/core/api/states/{entity_id}",
+            headers=headers,
+            json=payload,
+            timeout=request_timeout,
+        )
+        response.raise_for_status()
+        return True
+    except requests.RequestException as error:
+        LOGGER.error(
+            "[HA] Não foi possível atualizar a entidade %s: %s",
+            entity_id,
+            error,
+        )
+        return False
+
+
+def publish_reader_entity(
+    supervisor_token: str,
+    reader: dict[str, Any],
+    runtime: dict[str, Any],
+    request_timeout: int,
+) -> None:
+    """Publica o estado operacional individual de um leitor."""
+    reader_slug = slugify_entity(reader["name"])
+    status = runtime.get("status", "unknown")
+    entity_state = "on" if status == "online" else "off"
+
+    set_ha_state(
+        supervisor_token=supervisor_token,
+        entity_id=f"binary_sensor.seiden_evo_reader_{reader_slug}",
+        state=entity_state,
+        attributes={
+            "friendly_name": f"EVO {reader['name']}",
+            "device_class": "connectivity",
+            "reader_name": reader["name"],
+            "reader_ip": reader["ip"],
+            "direction": reader["direction"],
+            "operational_status": status,
+            "failure_count": runtime.get("failures", 0),
+            "last_error": runtime.get("last_error"),
+            "offline_since": runtime.get("offline_since_iso"),
+            "last_success": runtime.get("last_success_iso"),
+            "last_event": runtime.get("last_event"),
+            "icon": "mdi:face-recognition",
+        },
+        request_timeout=request_timeout,
+    )
+
+
+def publish_operational_entities(
+    supervisor_token: str,
+    readers: list[dict[str, Any]],
+    reader_runtime: dict[str, dict[str, Any]],
+    state: dict[str, Any],
+    started_monotonic: float,
+    request_timeout: int,
+) -> None:
+    """Publica as entidades usadas pelo dashboard operacional."""
+    runtimes = [reader_runtime[reader["ip"]] for reader in readers]
+    online = sum(1 for runtime in runtimes if runtime.get("status") == "online")
+    offline = sum(1 for runtime in runtimes if runtime.get("status") == "offline")
+    unknown = len(readers) - online - offline
+    people = list(state.get("people_inside", {}).values())
+    last_event = state.get("last_event") or {}
+    uptime_seconds = int(time.monotonic() - started_monotonic)
+
+    common = {"integration": "Seiden EVO Bridge", "bridge_version": BRIDGE_VERSION}
+    reader_statuses = [
+        {
+            "name": reader["name"],
+            "ip": reader["ip"],
+            "direction": reader["direction"],
+            "status": reader_runtime[reader["ip"]].get("status", "unknown"),
+            "failure_count": reader_runtime[reader["ip"]].get("failures", 0),
+            "last_success": reader_runtime[reader["ip"]].get("last_success_iso"),
+            "last_error": reader_runtime[reader["ip"]].get("last_error"),
+            "last_event": reader_runtime[reader["ip"]].get("last_event"),
+        }
+        for reader in readers
+    ]
+
+    entities = [
+        ("binary_sensor.seiden_evo_bridge_running", "on", {**common, "friendly_name": "EVO Bridge", "device_class": "running", "icon": "mdi:bridge"}),
+        ("sensor.seiden_evo_bridge_version", BRIDGE_VERSION, {**common, "friendly_name": "Versão EVO Bridge", "icon": "mdi:tag-outline"}),
+        ("sensor.seiden_evo_bridge_uptime", uptime_seconds, {**common, "friendly_name": "Uptime EVO Bridge", "unit_of_measurement": "s", "device_class": "duration", "state_class": "measurement", "icon": "mdi:timer-outline"}),
+        ("sensor.seiden_evo_readers_online", online, {**common, "friendly_name": "Leitores EVO online", "icon": "mdi:lan-connect"}),
+        ("sensor.seiden_evo_readers_offline", offline, {**common, "friendly_name": "Leitores EVO offline", "icon": "mdi:lan-disconnect"}),
+        ("sensor.seiden_evo_readers_unknown", unknown, {**common, "friendly_name": "Leitores EVO verificando", "icon": "mdi:lan-pending"}),
+        ("sensor.seiden_evo_readers_status", f"{online}/{len(readers)}", {**common, "friendly_name": "Estado dos leitores EVO", "readers": reader_statuses, "online": online, "offline": offline, "unknown": unknown, "icon": "mdi:server-network"}),
+        ("sensor.seiden_evo_people_inside", len(people), {**common, "friendly_name": "Pessoas presentes", "people_inside": people, "names": [person.get("user_name") for person in people], "icon": "mdi:account-group"}),
+        ("binary_sensor.seiden_evo_building_occupied", "on" if people else "off", {**common, "friendly_name": "Ambiente ocupado", "device_class": "occupancy", "people_inside": len(people)}),
+        ("sensor.seiden_evo_events_today", state.get("events_today", 0), {**common, "friendly_name": "Movimentos hoje", "icon": "mdi:counter"}),
+        ("sensor.seiden_evo_entries_today", state.get("entries_today", 0), {**common, "friendly_name": "Entradas hoje", "icon": "mdi:login"}),
+        ("sensor.seiden_evo_exits_today", state.get("exits_today", 0), {**common, "friendly_name": "Saídas hoje", "icon": "mdi:logout"}),
+        ("sensor.seiden_evo_last_person", last_event.get("user_name", "Nenhum evento"), {**common, "friendly_name": "Última pessoa", "user_id": last_event.get("user_id"), "photo_url": last_event.get("photo_url"), "icon": "mdi:account-clock"}),
+        ("sensor.seiden_evo_last_action", last_event.get("action", "none"), {**common, "friendly_name": "Último movimento", "direction": last_event.get("direction"), "icon": "mdi:swap-horizontal"}),
+        ("sensor.seiden_evo_last_reader", last_event.get("reader_name", "Nenhum evento"), {**common, "friendly_name": "Último leitor", "reader_ip": last_event.get("reader_ip"), "icon": "mdi:face-recognition"}),
+        ("sensor.seiden_evo_last_event_time", last_event.get("time", "unknown"), {**common, "friendly_name": "Horário do último evento", "device_class": "timestamp", "icon": "mdi:clock-outline"}),
+    ]
+
+    for entity_id, entity_state, attributes in entities:
+        set_ha_state(
+            supervisor_token=supervisor_token,
+            entity_id=entity_id,
+            state=entity_state,
+            attributes=attributes,
+            request_timeout=request_timeout,
+        )
+
+    for reader in readers:
+        publish_reader_entity(
+            supervisor_token=supervisor_token,
+            reader=reader,
+            runtime=reader_runtime[reader["ip"]],
+            request_timeout=request_timeout,
+        )
+
+
 def record_key(record: dict[str, Any]) -> str:
     """
     Cria uma chave lógica para deduplicação.
@@ -512,6 +667,7 @@ def handle_authorized_record(
             }
 
         action = "entered"
+        state["entries_today"] = int(state.get("entries_today", 0)) + 1
 
     elif direction == "out":
         if was_already_inside:
@@ -527,6 +683,7 @@ def handle_authorized_record(
                 }
 
         action = "exited"
+        state["exits_today"] = int(state.get("exits_today", 0)) + 1
 
     else:
         raise RuntimeError(
@@ -536,6 +693,8 @@ def handle_authorized_record(
     people_inside = list(
         state["people_inside"].values()
     )
+
+    state["events_today"] = int(state.get("events_today", 0)) + 1
 
     payload = {
         "provider": "evo",
@@ -570,6 +729,17 @@ def handle_authorized_record(
         "raw": record,
     }
 
+    state["last_event"] = {
+        "user_id": user_id,
+        "user_name": user_name,
+        "reader_name": reader["name"],
+        "reader_ip": reader["ip"],
+        "direction": direction,
+        "action": action,
+        "time": event_time,
+        "photo_url": photo_url,
+    }
+
     save_state(state)
 
     return payload
@@ -581,9 +751,12 @@ def create_reader_runtime_state() -> dict[str, Any]:
         "failures": 0,
         "next_check": 0.0,
         "offline": False,
+        "status": "unknown",
         "offline_since_iso": None,
         "offline_since_monotonic": None,
         "last_error": None,
+        "last_success_iso": None,
+        "last_event": None,
     }
 
 
@@ -671,6 +844,7 @@ def mark_reader_offline(
 
     if not runtime["offline"]:
         runtime["offline"] = True
+        runtime["status"] = "offline"
         runtime["offline_since_iso"] = now_iso()
         runtime["offline_since_monotonic"] = (
             time.monotonic()
@@ -708,6 +882,13 @@ def mark_reader_offline(
             request_timeout=request_timeout,
         )
 
+    publish_reader_entity(
+        supervisor_token=supervisor_token,
+        reader=reader,
+        runtime=runtime,
+        request_timeout=request_timeout,
+    )
+
     LOGGER.warning(
         "[EVO][%s] Tentativa %d falhou. "
         "Nova tentativa em %ss.",
@@ -727,6 +908,7 @@ def mark_reader_online(
     """Restaura o leitor ao estado online."""
     reader_name = reader["name"]
     reader_ip = reader["ip"]
+    previous_status = runtime.get("status", "unknown")
 
     if runtime["offline"]:
         offline_duration = 0
@@ -765,9 +947,19 @@ def mark_reader_online(
     runtime["failures"] = 0
     runtime["next_check"] = 0.0
     runtime["offline"] = False
+    runtime["status"] = "online"
+    runtime["last_success_iso"] = now_iso()
     runtime["offline_since_iso"] = None
     runtime["offline_since_monotonic"] = None
     runtime["last_error"] = None
+
+    if previous_status != "online":
+        publish_reader_entity(
+            supervisor_token=supervisor_token,
+            reader=reader,
+            runtime=runtime,
+            request_timeout=request_timeout,
+        )
 
 
 def validate_global_config(
@@ -1080,14 +1272,27 @@ def log_reader_summary(
         )
 
 
-def wait_without_active_readers() -> None:
+def wait_without_active_readers(
+    state: dict[str, Any],
+    supervisor_token: str,
+    request_timeout: int,
+) -> None:
     """Mantém o Bridge ativo quando todos estão desativados."""
     LOGGER.warning(
         "Nenhum leitor EVO está ativo. "
         "O Bridge permanecerá em espera."
     )
+    started_monotonic = time.monotonic()
 
     while True:
+        publish_operational_entities(
+            supervisor_token=supervisor_token,
+            readers=[],
+            reader_runtime={},
+            state=state,
+            started_monotonic=started_monotonic,
+            request_timeout=request_timeout,
+        )
         time.sleep(IDLE_SLEEP_SECONDS)
 
 
@@ -1109,6 +1314,17 @@ def run_polling_loop(
         reader["ip"]: create_reader_runtime_state()
         for reader in readers
     }
+    started_monotonic = time.monotonic()
+    last_dashboard_publish = 0.0
+
+    publish_operational_entities(
+        supervisor_token=supervisor_token,
+        readers=readers,
+        reader_runtime=reader_runtime,
+        state=state,
+        started_monotonic=started_monotonic,
+        request_timeout=request_timeout,
+    )
 
     while True:
         loop_started_at = time.monotonic()
@@ -1193,12 +1409,28 @@ def run_polling_loop(
                     state=state,
                 )
 
+                runtime["last_event"] = {
+                    "user_name": presence_payload["user_name"],
+                    "action": presence_payload["action"],
+                    "time": presence_payload["time"],
+                }
+
                 event_sent = safe_fire_ha_event(
                     supervisor_token=supervisor_token,
                     event_type=presence_event,
                     payload=presence_payload,
                     request_timeout=request_timeout,
                 )
+
+                publish_operational_entities(
+                    supervisor_token=supervisor_token,
+                    readers=readers,
+                    reader_runtime=reader_runtime,
+                    state=state,
+                    started_monotonic=started_monotonic,
+                    request_timeout=request_timeout,
+                )
+                last_dashboard_publish = time.monotonic()
 
                 if event_sent:
                     LOGGER.info(
@@ -1240,6 +1472,20 @@ def run_polling_loop(
                     "[EVO][%s] Erro inesperado.",
                     reader_name,
                 )
+
+        if (
+            time.monotonic() - last_dashboard_publish
+            >= DASHBOARD_PUBLISH_INTERVAL
+        ):
+            publish_operational_entities(
+                supervisor_token=supervisor_token,
+                readers=readers,
+                reader_runtime=reader_runtime,
+                state=state,
+                started_monotonic=started_monotonic,
+                request_timeout=request_timeout,
+            )
+            last_dashboard_publish = time.monotonic()
 
         elapsed = time.monotonic() - loop_started_at
 
@@ -1359,7 +1605,11 @@ def main() -> None:
     )
 
     if not active_readers:
-        wait_without_active_readers()
+        wait_without_active_readers(
+            state=state,
+            supervisor_token=supervisor_token,
+            request_timeout=request_timeout,
+        )
         return
 
     run_polling_loop(
