@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.4
+
+### Adicionado
+
+- Entidades operacionais criadas diretamente no Home Assistant para uso em dashboards.
+- Estado geral do Bridge, versão e uptime.
+- Contadores de leitores online, offline e em verificação.
+- Estado individual de conectividade para cada leitor ativo.
+- Quantidade e lista de pessoas presentes.
+- Contadores diários de movimentos, entradas e saídas.
+- Informações da última pessoa, último movimento, último leitor e horário.
+- Sensor consolidado com o estado de todos os leitores.
+- Exemplo de dashboard operacional em `dashboard_evo.yaml`.
+
+### Alterado
+
+- O estado persistente passa a armazenar contadores diários e o último evento.
+- As entidades operacionais são atualizadas após eventos e periodicamente a cada 60 segundos.
+- O modo de espera sem leitores ativos também mantém as entidades do Bridge atualizadas.
+
 ## 0.4.3
 
 ### Corrigido
