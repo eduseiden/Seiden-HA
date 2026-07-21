@@ -1,63 +1,69 @@
-# Seiden EVO Bridge 0.4.5
+# Seiden EVO Bridge 0.5.0
 
-Integra leitores EVO Facial ao Home Assistant, mantém o motor de ocupação e publica eventos e entidades operacionais.
+Integra leitores EVO Facial ao Home Assistant, publica eventos de presença, mantém o estado de ocupação, monitora a disponibilidade dos leitores e disponibiliza entidades operacionais para dashboards.
 
-## Eventos
+## Novidade da versão 0.5.0
 
-- `seiden_presence`
-- `seiden_reader_offline`
-- `seiden_reader_online`
+A última fotografia capturada pelo leitor passa a ser disponibilizada automaticamente pelo add-on, sem necessidade de configurar manualmente uma câmera genérica no `configuration.yaml`.
 
-## Entidades operacionais
+A entidade criada é:
 
-A versão 0.4.5 cria e atualiza diretamente no Home Assistant:
+```text
+camera.seiden_evo_last_photo
+```
 
-- `binary_sensor.seiden_evo_bridge_running`
-- `sensor.seiden_evo_bridge_version`
-- `sensor.seiden_evo_bridge_uptime`
-- `sensor.seiden_evo_readers_online`
-- `sensor.seiden_evo_readers_offline`
-- `sensor.seiden_evo_readers_unknown`
-- `sensor.seiden_evo_readers_status`
-- `sensor.seiden_evo_people_inside`
-- `binary_sensor.seiden_evo_building_occupied`
-- `sensor.seiden_evo_events_today`
-- `sensor.seiden_evo_entries_today`
-- `sensor.seiden_evo_exits_today`
-- `sensor.seiden_evo_last_person`
-- `sensor.seiden_evo_last_action`
-- `sensor.seiden_evo_last_reader`
-- `sensor.seiden_evo_last_event_time`
-- `binary_sensor.seiden_evo_reader_<nome_do_leitor>` para cada leitor ativo.
+O add-on baixa a fotografia indicada em `photo_url`, grava uma cópia atualizada em:
 
-As entidades são atualizadas imediatamente após um evento e, para diagnóstico e uptime, a cada 60 segundos.
+```text
+/config/www/seiden_evo/latest.jpg
+```
 
-## Dashboard
+e publica a imagem por meio do atributo `entity_picture` com controle de cache.
 
-O arquivo `dashboard_evo.yaml` contém um dashboard operacional completo usando apenas cards nativos do Home Assistant.
+## Card recomendado
 
-Para importar:
+```yaml
+type: picture-entity
+entity: camera.seiden_evo_last_photo
+name: Última passagem
+show_name: true
+show_state: false
+show_entity_picture: true
+fit_mode: contain
+```
 
-1. Abra **Configurações → Painéis**.
-2. Crie um painel em modo YAML ou abra o editor de configuração bruta de uma nova visualização.
-3. Copie o conteúdo de `dashboard_evo.yaml`.
+> Observação: esta entidade visual é publicada pelo add-on por meio da API de estados do Home Assistant. Ela exibe a última imagem estática e não oferece streaming ou serviços nativos de câmera.
 
-## Observação técnica
+## Arquiteturas suportadas
 
-As entidades são publicadas pela API de estados do Home Assistant. Após uma reinicialização do Home Assistant, elas voltam a aparecer assim que o EVO Bridge executar sua próxima atualização.
+- `amd64`: mini PCs Intel/AMD
+- `aarch64`: Raspberry Pi 5 e outros equipamentos ARM64
 
+## Configuração nova
 
-## Compatibilidade de arquitetura
+```yaml
+publish_last_photo: true
+photo_max_size_mb: 5
+```
 
-A versão 0.4.5 pode ser construída e instalada em:
+- `publish_last_photo`: habilita ou desabilita a publicação automática da última imagem.
+- `photo_max_size_mb`: tamanho máximo aceito para a imagem baixada do leitor.
 
-- Home Assistant OS em Intel/AMD 64 bits (`amd64`);
-- Home Assistant OS em Raspberry Pi 5 (`aarch64`).
+## Entidades principais
 
-O arquivo `build.yaml` seleciona automaticamente a imagem-base adequada para cada arquitetura durante a construção do App.
+```text
+binary_sensor.seiden_evo_bridge_running
+sensor.seiden_evo_bridge_version
+sensor.seiden_evo_bridge_uptime
+sensor.seiden_evo_people_inside
+sensor.seiden_evo_events_today
+sensor.seiden_evo_entries_today
+sensor.seiden_evo_exits_today
+sensor.seiden_evo_last_person
+sensor.seiden_evo_last_action
+sensor.seiden_evo_last_reader
+sensor.seiden_evo_last_event_time
+camera.seiden_evo_last_photo
+```
 
-## Dados da última fotografia
-
-O evento `seiden_presence` e o estado persistente do último evento passam a incluir também `photo_filename`, além de `photo_url`. O sensor `sensor.seiden_evo_last_person` publica ambos como atributos.
-
-O estado de `sensor.seiden_evo_last_action` é exibido em português (`Entrada` ou `Saída`), preservando o valor técnico original (`entered` ou `exited`) no atributo `action`.
+Também é criada uma entidade de conectividade para cada leitor ativo.

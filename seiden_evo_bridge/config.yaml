@@ -1,5 +1,5 @@
 name: "Seiden EVO Bridge"
-version: "0.4.5"
+version: "0.5.0"
 slug: "seiden_evo_bridge"
 description: "Integra leitores EVO Facial ao Home Assistant com motor de ocupação e monitoramento de disponibilidade"
 url: "https://github.com/eduseiden/Seiden-HA"
@@ -15,6 +15,9 @@ arch:
 host_network: true
 hassio_api: true
 homeassistant_api: true
+
+map:
+  - config:rw
 hassio_role: default
 
 options:
@@ -22,6 +25,8 @@ options:
   request_timeout: 5
   max_retry_interval: 300
   log_level: "INFO"
+  publish_last_photo: true
+  photo_max_size_mb: 5
 
   ha_event: "seiden_presence"
   reader_offline_event: "seiden_reader_offline"
@@ -40,6 +45,8 @@ schema:
   request_timeout: int
   max_retry_interval: int
   log_level: list(DEBUG|INFO|WARNING|ERROR)
+  publish_last_photo: bool
+  photo_max_size_mb: int
 
   ha_event: str
   reader_offline_event: str

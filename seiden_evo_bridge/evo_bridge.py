@@ -19,7 +19,11 @@ DEFAULT_POLL_INTERVAL = 2
 DEFAULT_REQUEST_TIMEOUT = 5
 DEFAULT_MAX_RETRY_INTERVAL = 300
 DEFAULT_LOG_LEVEL = "INFO"
-BRIDGE_VERSION = "0.4.5"
+BRIDGE_VERSION = "0.5.0"
+
+LAST_PHOTO_DIR = Path("/config/www/seiden_evo")
+LAST_PHOTO_PATH = LAST_PHOTO_DIR / "latest.jpg"
+LAST_PHOTO_PUBLIC_URL = "/local/seiden_evo/latest.jpg"
 DASHBOARD_PUBLISH_INTERVAL = 60
 
 DEFAULT_PRESENCE_EVENT = "seiden_presence"
@@ -525,6 +529,100 @@ def publish_reader_entity(
     )
 
 
+def update_last_photo_file(
+    photo_url: str | None,
+    request_timeout: int,
+    maximum_size_mb: int = 5,
+) -> tuple[bool, str | None]:
+    """Baixa a última foto do leitor e a publica em /config/www."""
+    if not photo_url:
+        return False, "URL da foto ausente"
+
+    maximum_bytes = max(1, int(maximum_size_mb)) * 1024 * 1024
+    temporary_path = LAST_PHOTO_PATH.with_suffix(".tmp")
+
+    try:
+        response = requests.get(
+            photo_url,
+            timeout=request_timeout,
+            stream=True,
+        )
+        response.raise_for_status()
+
+        content_type = response.headers.get("Content-Type", "").lower()
+        if content_type and not (
+            "image/jpeg" in content_type or "image/jpg" in content_type
+        ):
+            return False, f"Tipo de conteúdo não suportado: {content_type}"
+
+        LAST_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+        total = 0
+        with temporary_path.open("wb") as file_handle:
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > maximum_bytes:
+                    raise ValueError(
+                        f"Imagem excede o limite de {maximum_size_mb} MB"
+                    )
+                file_handle.write(chunk)
+
+        if total == 0:
+            raise ValueError("Imagem recebida está vazia")
+
+        temporary_path.replace(LAST_PHOTO_PATH)
+        return True, None
+
+    except (requests.RequestException, OSError, ValueError) as error:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        LOGGER.warning("[FOTO] Não foi possível atualizar a última imagem: %s", error)
+        return False, str(error)
+
+
+def publish_last_photo_entity(
+    supervisor_token: str,
+    last_event: dict[str, Any],
+    request_timeout: int,
+    photo_available: bool,
+    photo_error: str | None = None,
+) -> None:
+    """Publica uma entidade visual autônoma com a última foto capturada."""
+    event_time = last_event.get("time") or now_iso()
+    cache_token = re.sub(r"[^0-9]", "", str(event_time)) or str(int(time.time()))
+    entity_picture = (
+        f"{LAST_PHOTO_PUBLIC_URL}?v={cache_token}" if photo_available else None
+    )
+
+    attributes = {
+        "friendly_name": "Última identificação EVO",
+        "integration": "Seiden EVO Bridge",
+        "bridge_version": BRIDGE_VERSION,
+        "entity_picture": entity_picture,
+        "photo_available": photo_available,
+        "photo_url": last_event.get("photo_url"),
+        "photo_filename": last_event.get("photo_filename"),
+        "person": last_event.get("user_name"),
+        "reader": last_event.get("reader_name"),
+        "action": last_event.get("action"),
+        "action_label": action_label(last_event.get("action")),
+        "captured_at": last_event.get("time"),
+        "photo_error": photo_error,
+        "icon": "mdi:camera-account",
+    }
+
+    set_ha_state(
+        supervisor_token=supervisor_token,
+        entity_id="camera.seiden_evo_last_photo",
+        state=event_time if photo_available else "unavailable",
+        attributes=attributes,
+        request_timeout=request_timeout,
+    )
+
+
 def publish_operational_entities(
     supervisor_token: str,
     readers: list[dict[str, Any]],
@@ -532,6 +630,8 @@ def publish_operational_entities(
     state: dict[str, Any],
     started_monotonic: float,
     request_timeout: int,
+    publish_last_photo: bool = True,
+    photo_max_size_mb: int = 5,
 ) -> None:
     """Publica as entidades usadas pelo dashboard operacional."""
     runtimes = [reader_runtime[reader["ip"]] for reader in readers]
@@ -541,6 +641,39 @@ def publish_operational_entities(
     people = list(state.get("people_inside", {}).values())
     last_event = state.get("last_event") or {}
     uptime_seconds = int(time.monotonic() - started_monotonic)
+
+    if publish_last_photo:
+        photo_available = LAST_PHOTO_PATH.exists()
+        photo_error = None
+        current_photo_url = last_event.get("photo_url")
+        current_photo_filename = last_event.get("photo_filename")
+        marker_file = LAST_PHOTO_DIR / ".source"
+        previous_source = None
+        try:
+            if marker_file.exists():
+                previous_source = marker_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            previous_source = None
+
+        if current_photo_url and current_photo_url != previous_source:
+            photo_available, photo_error = update_last_photo_file(
+                photo_url=current_photo_url,
+                request_timeout=request_timeout,
+                maximum_size_mb=photo_max_size_mb,
+            )
+            if photo_available:
+                try:
+                    marker_file.write_text(str(current_photo_url), encoding="utf-8")
+                except OSError as error:
+                    LOGGER.warning("[FOTO] Não foi possível salvar marcador da foto: %s", error)
+
+        publish_last_photo_entity(
+            supervisor_token=supervisor_token,
+            last_event=last_event,
+            request_timeout=request_timeout,
+            photo_available=photo_available,
+            photo_error=photo_error,
+        )
 
     common = {"integration": "Seiden EVO Bridge", "bridge_version": BRIDGE_VERSION}
     reader_statuses = [
@@ -853,6 +986,8 @@ def mark_reader_offline(
         poll_interval=poll_interval,
         failure_count=runtime["failures"],
         max_retry_interval=max_retry_interval,
+        publish_last_photo=publish_last_photo,
+        photo_max_size_mb=photo_max_size_mb,
     )
 
     runtime["next_check"] = (
@@ -1300,6 +1435,8 @@ def wait_without_active_readers(
     state: dict[str, Any],
     supervisor_token: str,
     request_timeout: int,
+    publish_last_photo: bool,
+    photo_max_size_mb: int,
 ) -> None:
     """Mantém o Bridge ativo quando todos estão desativados."""
     LOGGER.warning(
@@ -1316,6 +1453,8 @@ def wait_without_active_readers(
             state=state,
             started_monotonic=started_monotonic,
             request_timeout=request_timeout,
+            publish_last_photo=publish_last_photo,
+            photo_max_size_mb=photo_max_size_mb,
         )
         time.sleep(IDLE_SLEEP_SECONDS)
 
@@ -1330,6 +1469,8 @@ def run_polling_loop(
     poll_interval: int,
     request_timeout: int,
     max_retry_interval: int,
+    publish_last_photo: bool,
+    photo_max_size_mb: int,
 ) -> None:
     """Executa o loop principal de monitoramento."""
     last_seen: dict[str, str] = {}
@@ -1348,6 +1489,8 @@ def run_polling_loop(
         state=state,
         started_monotonic=started_monotonic,
         request_timeout=request_timeout,
+        publish_last_photo=publish_last_photo,
+        photo_max_size_mb=photo_max_size_mb,
     )
 
     while True:
@@ -1453,6 +1596,8 @@ def run_polling_loop(
                     state=state,
                     started_monotonic=started_monotonic,
                     request_timeout=request_timeout,
+                    publish_last_photo=publish_last_photo,
+                    photo_max_size_mb=photo_max_size_mb,
                 )
                 last_dashboard_publish = time.monotonic()
 
@@ -1508,6 +1653,8 @@ def run_polling_loop(
                 state=state,
                 started_monotonic=started_monotonic,
                 request_timeout=request_timeout,
+                publish_last_photo=publish_last_photo,
+                photo_max_size_mb=photo_max_size_mb,
             )
             last_dashboard_publish = time.monotonic()
 
@@ -1573,6 +1720,14 @@ def main() -> None:
         )
     )
 
+    publish_last_photo = bool(
+        config.get("publish_last_photo", True)
+    )
+
+    photo_max_size_mb = int(
+        config.get("photo_max_size_mb", 5)
+    )
+
     presence_event = config.get(
         "ha_event",
         DEFAULT_PRESENCE_EVENT,
@@ -1633,6 +1788,8 @@ def main() -> None:
             state=state,
             supervisor_token=supervisor_token,
             request_timeout=request_timeout,
+            publish_last_photo=publish_last_photo,
+            photo_max_size_mb=photo_max_size_mb,
         )
         return
 
@@ -1646,6 +1803,8 @@ def main() -> None:
         poll_interval=poll_interval,
         request_timeout=request_timeout,
         max_retry_interval=max_retry_interval,
+        publish_last_photo=publish_last_photo,
+        photo_max_size_mb=photo_max_size_mb,
     )
 
 

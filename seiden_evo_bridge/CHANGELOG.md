@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+
+- Publicação automática da última fotografia em `camera.seiden_evo_last_photo`.
+- Elimina a necessidade de configurar manualmente uma câmera genérica para o dashboard.
+- Download da fotografia diretamente do `photo_url` informado pelo leitor EVO.
+- Armazenamento local da imagem em `/config/www/seiden_evo/latest.jpg`.
+- Atualização atômica do arquivo para evitar imagem parcial durante o download.
+- Controle de cache por parâmetro de versão na URL da imagem.
+- Validação de tipo JPEG, tamanho máximo e imagem vazia.
+- Novas opções `publish_last_photo` e `photo_max_size_mb`.
+- Mantido suporte multi-arquitetura para AMD64 e AArch64.
+- Mantida compatibilidade dos eventos e sensores existentes da versão 0.4.5.
+
 ## 0.4.5
 
 ### Adicionado
