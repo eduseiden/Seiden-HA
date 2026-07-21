@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.5
+
+### Adicionado
+
+- Suporte à arquitetura `aarch64`, utilizada pelo Raspberry Pi 5.
+- Arquivo `build.yaml` para selecionar a imagem-base correta em `amd64` e `aarch64`.
+- Campo `photo_filename` no evento de presença, no último evento persistido e nos atributos do sensor da última pessoa.
+
+### Alterado
+
+- Dockerfile passa a utilizar `ARG BUILD_FROM`, sem fixar a imagem `amd64`.
+- Estado de `sensor.seiden_evo_last_action` passa a ser exibido como `Entrada` ou `Saída`.
+- Valor técnico original do movimento permanece disponível no atributo `action`.
+- Versão central do Bridge atualizada para `0.4.5`.
+
 ## 0.4.4
 
 ### Adicionado

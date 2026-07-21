@@ -1,0 +1,86 @@
+title: EVO Operacional
+views:
+  - title: Operação
+    path: evo-operacional
+    icon: mdi:face-recognition
+    cards:
+      - type: glance
+        title: Visão geral
+        show_name: true
+        show_state: true
+        entities:
+          - entity: binary_sensor.seiden_evo_bridge_running
+            name: Bridge
+          - entity: sensor.seiden_evo_people_inside
+            name: Presentes
+          - entity: sensor.seiden_evo_readers_online
+            name: Online
+          - entity: sensor.seiden_evo_readers_offline
+            name: Offline
+          - entity: sensor.seiden_evo_events_today
+            name: Movimentos
+
+      - type: entities
+        title: Movimento mais recente
+        entities:
+          - entity: sensor.seiden_evo_last_person
+            name: Pessoa
+          - entity: sensor.seiden_evo_last_action
+            name: Movimento
+          - entity: sensor.seiden_evo_last_reader
+            name: Leitor
+          - entity: sensor.seiden_evo_last_event_time
+            name: Horário
+
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.seiden_evo_entries_today
+            name: Entradas hoje
+            min: 0
+            max: 100
+          - type: gauge
+            entity: sensor.seiden_evo_exits_today
+            name: Saídas hoje
+            min: 0
+            max: 100
+
+      - type: markdown
+        title: Pessoas presentes
+        content: >-
+          {% set people = state_attr('sensor.seiden_evo_people_inside', 'people_inside') or [] %}
+          {% if people | count == 0 %}
+          **Ambiente vazio**
+          {% else %}
+          {% for person in people %}
+          - **{{ person.user_name }}** — entrada às {{ person.entered_at }} pelo leitor {{ person.reader_name }}
+          {% endfor %}
+          {% endif %}
+
+      - type: markdown
+        title: Estado dos leitores
+        content: >-
+          {% set readers = state_attr('sensor.seiden_evo_readers_status', 'readers') or [] %}
+          {% if readers | count == 0 %}
+          Nenhum leitor ativo configurado.
+          {% else %}
+          {% for reader in readers %}
+          {% if reader.status == 'online' %}🟢{% elif reader.status == 'offline' %}🔴{% else %}🟡{% endif %}
+          **{{ reader.name }}** — {{ reader.status }} · {{ 'Entrada' if reader.direction == 'in' else 'Saída' }}
+          {% if reader.last_error %}  
+          Erro: {{ reader.last_error }}
+          {% endif %}
+          {% endfor %}
+          {% endif %}
+
+      - type: entities
+        title: Diagnóstico
+        entities:
+          - entity: sensor.seiden_evo_bridge_version
+            name: Versão
+          - entity: sensor.seiden_evo_bridge_uptime
+            name: Uptime
+          - entity: sensor.seiden_evo_readers_unknown
+            name: Em verificação
+          - entity: binary_sensor.seiden_evo_building_occupied
+            name: Ambiente ocupado

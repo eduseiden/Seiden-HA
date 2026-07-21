@@ -1,4 +1,5 @@
-FROM ghcr.io/home-assistant/amd64-base-python:3.13-alpine3.21
+ARG BUILD_FROM
+FROM ${BUILD_FROM}
 
 RUN python3 -m pip install --no-cache-dir requests
 

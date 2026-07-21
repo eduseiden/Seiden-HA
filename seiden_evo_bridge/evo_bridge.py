@@ -19,7 +19,7 @@ DEFAULT_POLL_INTERVAL = 2
 DEFAULT_REQUEST_TIMEOUT = 5
 DEFAULT_MAX_RETRY_INTERVAL = 300
 DEFAULT_LOG_LEVEL = "INFO"
-BRIDGE_VERSION = "0.4.4"
+BRIDGE_VERSION = "0.4.5"
 DASHBOARD_PUBLISH_INTERVAL = 60
 
 DEFAULT_PRESENCE_EVENT = "seiden_presence"
@@ -570,8 +570,8 @@ def publish_operational_entities(
         ("sensor.seiden_evo_events_today", state.get("events_today", 0), {**common, "friendly_name": "Movimentos hoje", "icon": "mdi:counter"}),
         ("sensor.seiden_evo_entries_today", state.get("entries_today", 0), {**common, "friendly_name": "Entradas hoje", "icon": "mdi:login"}),
         ("sensor.seiden_evo_exits_today", state.get("exits_today", 0), {**common, "friendly_name": "Saídas hoje", "icon": "mdi:logout"}),
-        ("sensor.seiden_evo_last_person", last_event.get("user_name", "Nenhum evento"), {**common, "friendly_name": "Última pessoa", "user_id": last_event.get("user_id"), "photo_url": last_event.get("photo_url"), "icon": "mdi:account-clock"}),
-        ("sensor.seiden_evo_last_action", last_event.get("action", "none"), {**common, "friendly_name": "Último movimento", "direction": last_event.get("direction"), "icon": "mdi:swap-horizontal"}),
+        ("sensor.seiden_evo_last_person", last_event.get("user_name", "Nenhum evento"), {**common, "friendly_name": "Última pessoa", "user_id": last_event.get("user_id"), "photo_url": last_event.get("photo_url"), "photo_filename": last_event.get("photo_filename"), "icon": "mdi:account-clock"}),
+        ("sensor.seiden_evo_last_action", action_label(last_event.get("action")), {**common, "friendly_name": "Último movimento", "action": last_event.get("action", "none"), "direction": last_event.get("direction"), "icon": "mdi:swap-horizontal"}),
         ("sensor.seiden_evo_last_reader", last_event.get("reader_name", "Nenhum evento"), {**common, "friendly_name": "Último leitor", "reader_ip": last_event.get("reader_ip"), "icon": "mdi:face-recognition"}),
         ("sensor.seiden_evo_last_event_time", last_event.get("time", "unknown"), {**common, "friendly_name": "Horário do último evento", "device_class": "timestamp", "icon": "mdi:clock-outline"}),
     ]
@@ -624,6 +624,27 @@ def build_photo_url(
     return f"http://{reader['ip']}{photo_path}"
 
 
+def build_photo_filename(record: dict[str, Any]) -> str | None:
+    """Extrai o nome do arquivo de foto informado pelo leitor."""
+    photo_path = record.get("photourl")
+
+    if not photo_path:
+        return None
+
+    filename = Path(str(photo_path)).name
+    return filename or None
+
+
+def action_label(action: str | None) -> str:
+    """Traduz o movimento técnico para exibição no Home Assistant."""
+    labels = {
+        "entered": "Entrada",
+        "exited": "Saída",
+        "none": "Nenhum evento",
+    }
+    return labels.get(str(action), str(action or "Nenhum evento"))
+
+
 def handle_authorized_record(
     reader: dict[str, Any],
     record: dict[str, Any],
@@ -637,6 +658,7 @@ def handle_authorized_record(
     direction = reader["direction"]
     event_time = record.get("time") or now_iso()
     photo_url = build_photo_url(reader, record)
+    photo_filename = build_photo_filename(record)
 
     people_before = len(state["people_inside"])
 
@@ -710,6 +732,7 @@ def handle_authorized_record(
         "inout": record.get("inout"),
         "time": event_time,
         "photo_url": photo_url,
+        "photo_filename": photo_filename,
         "was_already_inside": was_already_inside,
         "exit_without_entry": (
             direction == "out"
@@ -738,6 +761,7 @@ def handle_authorized_record(
         "action": action,
         "time": event_time,
         "photo_url": photo_url,
+        "photo_filename": photo_filename,
     }
 
     save_state(state)
