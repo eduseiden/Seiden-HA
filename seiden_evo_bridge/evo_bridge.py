@@ -19,7 +19,7 @@ DEFAULT_POLL_INTERVAL = 2
 DEFAULT_REQUEST_TIMEOUT = 5
 DEFAULT_MAX_RETRY_INTERVAL = 300
 DEFAULT_LOG_LEVEL = "INFO"
-BRIDGE_VERSION = "0.5.0"
+BRIDGE_VERSION = "0.5.1"
 
 LAST_PHOTO_DIR = Path("/config/www/seiden_evo")
 LAST_PHOTO_PATH = LAST_PHOTO_DIR / "latest.jpg"
@@ -531,15 +531,24 @@ def publish_reader_entity(
 
 def update_last_photo_file(
     photo_url: str | None,
+    photo_filename: str | None,
     request_timeout: int,
     maximum_size_mb: int = 5,
-) -> tuple[bool, str | None]:
-    """Baixa a última foto do leitor e a publica em /config/www."""
+) -> tuple[bool, str | None, str | None]:
+    """Baixa a última foto e cria uma URL única para evitar cache."""
     if not photo_url:
-        return False, "URL da foto ausente"
+        return False, None, "URL da foto ausente"
 
     maximum_bytes = max(1, int(maximum_size_mb)) * 1024 * 1024
-    temporary_path = LAST_PHOTO_PATH.with_suffix(".tmp")
+    safe_name = Path(str(photo_filename or "")).name
+    if not safe_name.lower().endswith((".jpg", ".jpeg")):
+        safe_name = f"capture_{int(time.time() * 1000)}.jpg"
+
+    stem = re.sub(r"[^a-zA-Z0-9_-]+", "_", Path(safe_name).stem).strip("_")
+    stem = stem or "capture"
+    unique_name = f"{stem}_{int(time.time() * 1000)}.jpg"
+    target_path = LAST_PHOTO_DIR / unique_name
+    temporary_path = LAST_PHOTO_DIR / f".{unique_name}.tmp"
 
     try:
         response = requests.get(
@@ -553,7 +562,7 @@ def update_last_photo_file(
         if content_type and not (
             "image/jpeg" in content_type or "image/jpg" in content_type
         ):
-            return False, f"Tipo de conteúdo não suportado: {content_type}"
+            return False, None, f"Tipo de conteúdo não suportado: {content_type}"
 
         LAST_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
         total = 0
@@ -571,8 +580,27 @@ def update_last_photo_file(
         if total == 0:
             raise ValueError("Imagem recebida está vazia")
 
-        temporary_path.replace(LAST_PHOTO_PATH)
-        return True, None
+        temporary_path.replace(target_path)
+
+        # Mantém também um arquivo estável para acesso manual e compatibilidade.
+        try:
+            LAST_PHOTO_PATH.write_bytes(target_path.read_bytes())
+        except OSError as error:
+            LOGGER.warning("[FOTO] Não foi possível atualizar latest.jpg: %s", error)
+
+        # Remove capturas antigas, preservando a atual e latest.jpg.
+        try:
+            candidates = sorted(
+                (item for item in LAST_PHOTO_DIR.glob("*.jpg") if item.name != "latest.jpg"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for old_file in candidates[5:]:
+                old_file.unlink(missing_ok=True)
+        except OSError as error:
+            LOGGER.debug("[FOTO] Não foi possível limpar imagens antigas: %s", error)
+
+        return True, f"/local/seiden_evo/{unique_name}", None
 
     except (requests.RequestException, OSError, ValueError) as error:
         try:
@@ -580,7 +608,7 @@ def update_last_photo_file(
         except OSError:
             pass
         LOGGER.warning("[FOTO] Não foi possível atualizar a última imagem: %s", error)
-        return False, str(error)
+        return False, None, str(error)
 
 
 def publish_last_photo_entity(
@@ -588,20 +616,17 @@ def publish_last_photo_entity(
     last_event: dict[str, Any],
     request_timeout: int,
     photo_available: bool,
+    entity_picture: str | None,
     photo_error: str | None = None,
 ) -> None:
-    """Publica uma entidade visual autônoma com a última foto capturada."""
+    """Publica a última foto como sensor com entity_picture."""
     event_time = last_event.get("time") or now_iso()
-    cache_token = re.sub(r"[^0-9]", "", str(event_time)) or str(int(time.time()))
-    entity_picture = (
-        f"{LAST_PHOTO_PUBLIC_URL}?v={cache_token}" if photo_available else None
-    )
 
     attributes = {
         "friendly_name": "Última identificação EVO",
         "integration": "Seiden EVO Bridge",
         "bridge_version": BRIDGE_VERSION,
-        "entity_picture": entity_picture,
+        "entity_picture": entity_picture if photo_available else None,
         "photo_available": photo_available,
         "photo_url": last_event.get("photo_url"),
         "photo_filename": last_event.get("photo_filename"),
@@ -616,12 +641,11 @@ def publish_last_photo_entity(
 
     set_ha_state(
         supervisor_token=supervisor_token,
-        entity_id="camera.seiden_evo_last_photo",
+        entity_id="sensor.seiden_evo_last_photo",
         state=event_time if photo_available else "unavailable",
         attributes=attributes,
         request_timeout=request_timeout,
     )
-
 
 def publish_operational_entities(
     supervisor_token: str,
@@ -645,25 +669,34 @@ def publish_operational_entities(
     if publish_last_photo:
         photo_available = LAST_PHOTO_PATH.exists()
         photo_error = None
+        entity_picture = LAST_PHOTO_PUBLIC_URL if photo_available else None
         current_photo_url = last_event.get("photo_url")
         current_photo_filename = last_event.get("photo_filename")
         marker_file = LAST_PHOTO_DIR / ".source"
+        picture_marker_file = LAST_PHOTO_DIR / ".entity_picture"
         previous_source = None
         try:
             if marker_file.exists():
                 previous_source = marker_file.read_text(encoding="utf-8").strip()
+            if picture_marker_file.exists():
+                stored_picture = picture_marker_file.read_text(encoding="utf-8").strip()
+                if stored_picture:
+                    entity_picture = stored_picture
         except OSError:
             previous_source = None
 
         if current_photo_url and current_photo_url != previous_source:
-            photo_available, photo_error = update_last_photo_file(
+            photo_available, new_entity_picture, photo_error = update_last_photo_file(
                 photo_url=current_photo_url,
+                photo_filename=current_photo_filename,
                 request_timeout=request_timeout,
                 maximum_size_mb=photo_max_size_mb,
             )
-            if photo_available:
+            if photo_available and new_entity_picture:
+                entity_picture = new_entity_picture
                 try:
                     marker_file.write_text(str(current_photo_url), encoding="utf-8")
+                    picture_marker_file.write_text(entity_picture, encoding="utf-8")
                 except OSError as error:
                     LOGGER.warning("[FOTO] Não foi possível salvar marcador da foto: %s", error)
 
@@ -672,6 +705,7 @@ def publish_operational_entities(
             last_event=last_event,
             request_timeout=request_timeout,
             photo_available=photo_available,
+            entity_picture=entity_picture,
             photo_error=photo_error,
         )
 

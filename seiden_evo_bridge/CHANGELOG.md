@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- Corrige a atualização visual da última fotografia no dashboard.
+- Substitui a entidade artificial `camera.seiden_evo_last_photo` por `sensor.seiden_evo_last_photo`, usando o atributo nativo `entity_picture`.
+- Gera uma URL de imagem exclusiva a cada passagem para eliminar cache do navegador e do frontend do Home Assistant.
+- Mantém `/local/seiden_evo/latest.jpg` para acesso manual e compatibilidade.
+- Preserva somente as cinco capturas mais recentes no diretório local.
+
 ## 0.5.0
 
 - Publicação automática da última fotografia em `camera.seiden_evo_last_photo`.

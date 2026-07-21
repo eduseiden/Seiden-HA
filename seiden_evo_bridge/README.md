@@ -1,15 +1,15 @@
-# Seiden EVO Bridge 0.5.0
+# Seiden EVO Bridge 0.5.1
 
 Integra leitores EVO Facial ao Home Assistant, publica eventos de presença, mantém o estado de ocupação, monitora a disponibilidade dos leitores e disponibiliza entidades operacionais para dashboards.
 
-## Novidade da versão 0.5.0
+## Novidade da versão 0.5.1
 
 A última fotografia capturada pelo leitor passa a ser disponibilizada automaticamente pelo add-on, sem necessidade de configurar manualmente uma câmera genérica no `configuration.yaml`.
 
 A entidade criada é:
 
 ```text
-camera.seiden_evo_last_photo
+sensor.seiden_evo_last_photo
 ```
 
 O add-on baixa a fotografia indicada em `photo_url`, grava uma cópia atualizada em:
@@ -24,7 +24,7 @@ e publica a imagem por meio do atributo `entity_picture` com controle de cache.
 
 ```yaml
 type: picture-entity
-entity: camera.seiden_evo_last_photo
+entity: sensor.seiden_evo_last_photo
 name: Última passagem
 show_name: true
 show_state: false
@@ -63,7 +63,7 @@ sensor.seiden_evo_last_person
 sensor.seiden_evo_last_action
 sensor.seiden_evo_last_reader
 sensor.seiden_evo_last_event_time
-camera.seiden_evo_last_photo
+sensor.seiden_evo_last_photo
 ```
 
 Também é criada uma entidade de conectividade para cada leitor ativo.
